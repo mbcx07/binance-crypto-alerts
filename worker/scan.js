@@ -3,9 +3,14 @@ import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Load environment variables from .env file
+const envPath = path.join(__dirname, '.env');
+dotenv.config({ path: envPath });
 
 // ===============================
 // CONFIGURATION
@@ -15,6 +20,7 @@ const CONFIG = {
     baseUrl: 'https://fapi.binance.com',
     exchangeInfo: '/fapi/v1/exchangeInfo',
     ticker24h: '/fapi/v1/ticker/24hr',
+    tickerPrice: '/fapi/v1/ticker/price',
     klines: '/fapi/v1/klines',
   },
   telegram: {
@@ -23,6 +29,7 @@ const CONFIG = {
     apiUrl: `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
   },
   scanner: {
+    maxPositions: 10,
     topN: 5,
     timeframe: '15m',
     minVolume: 5000000, // 5M USDT minimum 24h volume
@@ -122,6 +129,205 @@ function detectBreakout(klines, period) {
   };
 }
 
+function determineTrendDirection(klines, period = 10) {
+  const recent = klines.slice(-period);
+  const closes = recent.map((k) => parseFloat(k[4]));
+  
+  // Simple Moving Average
+  const sma = closes.reduce((a, b) => a + b, 0) / closes.length;
+  const currentClose = closes[closes.length - 1];
+  
+  // Determine direction based on price relative to SMA and recent momentum
+  const recentChange = (currentClose - closes[0]) / closes[0];
+  
+  if (currentClose > sma && recentChange > 0) {
+    return 'BUY';
+  } else if (currentClose < sma && recentChange < 0) {
+    return 'SELL';
+  } else if (recentChange > 0) {
+    return 'BUY';
+  } else if (recentChange < 0) {
+    return 'SELL';
+  }
+  
+  return 'BUY'; // Default to BUY if neutral
+}
+
+// ===============================
+// POSITION MANAGEMENT
+// ===============================
+const DATA_DIR = path.join(__dirname, '..', 'data');
+
+function loadActivePositions() {
+  const file = path.join(DATA_DIR, 'active-positions.json');
+  if (!fs.existsSync(file)) {
+    return [];
+  }
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf-8'));
+  } catch (error) {
+    console.error('❌ Failed to load active positions:', error.message);
+    return [];
+  }
+}
+
+function saveActivePositions(positions) {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+  fs.writeFileSync(
+    path.join(DATA_DIR, 'active-positions.json'),
+    JSON.stringify(positions, null, 2)
+  );
+}
+
+async function getCurrentPrice(symbol) {
+  const response = await axios.get(`${CONFIG.binance.baseUrl}${CONFIG.binance.tickerPrice}`, {
+    params: { symbol },
+  });
+  return parseFloat(response.data.price);
+}
+
+async function checkPositionClosures() {
+  const positions = loadActivePositions();
+  if (positions.length === 0) return [];
+
+  const closedPositions = [];
+
+  for (const position of positions) {
+    try {
+      const currentPrice = await getCurrentPrice(position.pair);
+      
+      if (position.type === 'BUY') {
+        if (currentPrice <= position.stopLoss) {
+          position.closedAt = Date.now();
+          position.closedBy = 'STOP_LOSS';
+          position.closePrice = currentPrice;
+          position.pnl = currentPrice - position.entry;
+          closedPositions.push(position);
+        } else if (currentPrice >= position.takeProfit) {
+          position.closedAt = Date.now();
+          position.closedBy = 'TAKE_PROFIT';
+          position.closePrice = currentPrice;
+          position.pnl = currentPrice - position.entry;
+          closedPositions.push(position);
+        }
+      } else {
+        // SELL
+        if (currentPrice >= position.stopLoss) {
+          position.closedAt = Date.now();
+          position.closedBy = 'STOP_LOSS';
+          position.closePrice = currentPrice;
+          position.pnl = position.entry - currentPrice;
+          closedPositions.push(position);
+        } else if (currentPrice <= position.takeProfit) {
+          position.closedAt = Date.now();
+          position.closedBy = 'TAKE_PROFIT';
+          position.closePrice = currentPrice;
+          position.pnl = position.entry - currentPrice;
+          closedPositions.push(position);
+        }
+      }
+    } catch (error) {
+      console.error(`❌ Error checking position ${position.pair}:`, error.message);
+    }
+  }
+
+  if (closedPositions.length > 0) {
+    // Remove closed positions
+    const activePositions = positions.filter(p => 
+      !closedPositions.some(cp => cp.id === p.id)
+    );
+    saveActivePositions(activePositions);
+
+    // Send alerts for closed positions
+    for (const closed of closedPositions) {
+      await sendPositionClosedAlert(closed);
+    }
+  }
+
+  return closedPositions;
+}
+
+async function sendPositionClosedAlert(position) {
+  const pnlPercent = (position.pnl / position.entry) * 100;
+  const emoji = position.closedBy === 'TAKE_PROFIT' ? '✅' : '❌';
+  
+  const message = `${emoji} Posición CERRADA\n\n` +
+    `[${position.pair}] ${position.type}\n` +
+    `📊 Entrada: ${position.entry.toFixed(4)}\n` +
+    `🔚 Cierre: ${position.closePrice.toFixed(4)}\n` +
+    `💰 PnL: ${position.pnl >= 0 ? '+' : ''}${position.pnl.toFixed(4)} (${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}%)\n` +
+    `📌 ${position.closedBy === 'TAKE_PROFIT' ? 'Take Profit alcanzado' : 'Stop Loss alcanzado'}`;
+
+  try {
+    await axios.post(CONFIG.telegram.apiUrl, {
+      chat_id: CONFIG.telegram.chatId,
+      text: message,
+    });
+    console.log(`📤 Sent closed position alert for ${position.pair}`);
+  } catch (error) {
+    console.error(`❌ Failed to send closed position alert for ${position.pair}:`, error.message);
+  }
+}
+
+async function addPositionToActive(signal) {
+  const positions = loadActivePositions();
+  
+  const newPosition = {
+    id: signal.id,
+    pair: signal.pair,
+    type: signal.type,
+    entry: signal.price,
+    stopLoss: signal.stopLoss,
+    takeProfit: signal.takeProfit,
+    score: signal.score,
+    reason: signal.reason,
+    timestamp: signal.timestamp,
+    volume24h: signal.volume24h,
+  };
+  
+  positions.push(newPosition);
+  saveActivePositions(positions);
+  
+  console.log(`✅ Added ${signal.pair} to active positions (${positions.length}/${CONFIG.scanner.maxPositions})`);
+}
+
+function manualClosePosition(pair) {
+  const positions = loadActivePositions();
+  const index = positions.findIndex(p => p.pair === pair);
+  
+  if (index === -1) {
+    console.log(`⚠️ Position ${pair} not found in active positions`);
+    return false;
+  }
+  
+  const position = positions[index];
+  
+  try {
+    getCurrentPrice(position.pair).then(currentPrice => {
+      position.closedAt = Date.now();
+      position.closedBy = 'MANUAL';
+      position.closePrice = currentPrice;
+      position.pnl = position.type === 'BUY' 
+        ? currentPrice - position.entry 
+        : position.entry - currentPrice;
+      
+      sendPositionClosedAlert(position);
+      
+      const activePositions = positions.filter(p => p.id !== position.id);
+      saveActivePositions(activePositions);
+      
+      console.log(`✅ Manually closed position ${pair}`);
+    });
+    
+    return true;
+  } catch (error) {
+    console.error(`❌ Error manually closing position ${pair}:`, error.message);
+    return false;
+  }
+}
+
 // ===============================
 // SCANNER LOGIC
 // ===============================
@@ -207,11 +413,35 @@ async function scanSignals() {
       // Skip low scores
       if (score < 4) continue;
 
+      const currentPrice = parseFloat(klines[klines.length - 1][4]);
+      
+      // If no breakout detected, determine direction based on trend
+      if (type === null) {
+        type = determineTrendDirection(klines, 10);
+        reason.push('trend');
+      }
+      
+      // Calculate Stop Loss and Take Profit based on ATR
+      const stopLossMultiplier = 1.5;
+      const takeProfitMultiplier = 2.5;
+      let stopLoss, takeProfit;
+
+      if (type === 'BUY') {
+        stopLoss = currentPrice - (atr * stopLossMultiplier);
+        takeProfit = currentPrice + (atr * takeProfitMultiplier);
+      } else {
+        // SELL
+        stopLoss = currentPrice + (atr * stopLossMultiplier);
+        takeProfit = currentPrice - (atr * takeProfitMultiplier);
+      }
+
       signals.push({
         id: `${symbol.symbol}-${Date.now()}`,
         pair: symbol.symbol,
         type: type || 'WATCH',
-        price: parseFloat(klines[klines.length - 1][4]),
+        price: currentPrice,
+        stopLoss: stopLoss,
+        takeProfit: takeProfit,
         score: Math.min(10, score),
         reason: reason.join('+'),
         timestamp: Date.now(),
@@ -245,13 +475,21 @@ async function scanSignals() {
 // TELEGRAM NOTIFICATIONS
 // ===============================
 async function sendTelegramAlert(signal) {
-  const message = `[${CONFIG.scanner.timeframe}][USDT-M] ${signal.pair} | ${signal.type} | ${signal.price.toFixed(2)} | score=${signal.score.toFixed(1)} | ${signal.reason} | ${new Date(signal.timestamp).toISOString()}`;
+  let message = `[${CONFIG.scanner.timeframe}][USDT-M] ${signal.pair} | ${signal.type}\n`;
+  message += `💰 Entry: ${signal.price.toFixed(4)}\n`;
+  
+  if (signal.stopLoss !== null && signal.takeProfit !== null) {
+    message += `🛑 Stop Loss: ${signal.stopLoss.toFixed(4)}\n`;
+    message += `🎯 Take Profit: ${signal.takeProfit.toFixed(4)}\n`;
+    message += `📊 R:R = ${Math.abs((signal.takeProfit - signal.price) / (signal.price - signal.stopLoss)).toFixed(2)}\n`;
+  }
+  
+  message += `⭐ Score: ${signal.score.toFixed(1)} | ${signal.reason}`;
 
   try {
     await axios.post(CONFIG.telegram.apiUrl, {
       chat_id: CONFIG.telegram.chatId,
       text: message,
-      parse_mode: 'HTML',
     });
     console.log(`📤 Sent alert for ${signal.pair}`);
   } catch (error) {
@@ -312,21 +550,42 @@ function markSymbolAlerted(symbol) {
 // ===============================
 async function main() {
   try {
-    await loadLastSignals();
-
-    const signals = await scanSignals();
-
-    for (const signal of signals) {
-      if (isSymbolInCooldown(signal.pair)) {
-        await sendCooldownAlert(signal.pair, lastSignals[signal.pair]);
-        continue;
-      }
-
-      await sendTelegramAlert(signal);
-      markSymbolAlerted(signal.pair);
+    console.log('🔄 Starting position check...');
+    
+    // Check for SL/TP closures
+    const closedPositions = await checkPositionClosures();
+    
+    if (closedPositions.length > 0) {
+      console.log(`📊 Closed ${closedPositions.length} position(s)`);
     }
 
-    await saveLastSignals();
+    // Load active positions
+    const activePositions = loadActivePositions();
+    console.log(`📈 Active positions: ${activePositions.length}/${CONFIG.scanner.maxPositions}`);
+
+    // Only scan if we have space for new positions
+    if (activePositions.length >= CONFIG.scanner.maxPositions) {
+      console.log(`⏸️ Maximum positions (${CONFIG.scanner.maxPositions}) reached. Skipping scan.`);
+      console.log('🏁 Scanner completed (max positions reached)');
+      return;
+    }
+
+    // Scan for new signals
+    const signals = await scanSignals();
+
+    // Filter signals: exclude pairs already in active positions
+    const availableSlots = CONFIG.scanner.maxPositions - activePositions.length;
+    const uniqueSignals = signals.filter(signal => 
+      !activePositions.some(pos => pos.pair === signal.pair)
+    ).slice(0, availableSlots);
+
+    console.log(`📊 Generated ${signals.length} signals, ${uniqueSignals.length} eligible for entry`);
+
+    // Send alerts and add to active positions
+    for (const signal of uniqueSignals) {
+      await sendTelegramAlert(signal);
+      await addPositionToActive(signal);
+    }
 
     console.log('🏁 Scanner completed successfully');
   } catch (error) {
