@@ -1,0 +1,13 @@
+# Node
+node_modules/
+
+# Worker deps (keep in CI via npm ci)
+worker/node_modules/
+
+# Local runtime data
+/data/
+data/
+
+# Env
+.env
+worker/.env
