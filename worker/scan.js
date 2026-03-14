@@ -738,8 +738,41 @@ async function sendTelegramAlert(signal) {
     await api.post(CONFIG.telegram.apiUrl, {
       chat_id: CONFIG.telegram.chatId,
       text: message,
-      parse_mode: 'HTML',
     });
+
+    // Record as OPEN virtual trade to monitor closures (real price only)
+    if (typeof signal.stopLoss === 'number' && typeof signal.takeProfit === 'number') {
+      const state = loadOpenTrades();
+      const side = signal.type === 'BUY' ? 'LONG' : 'SHORT';
+      const entryTs = signal.timestamp;
+      const tradeId = makeTradeId({ symbol: signal.pair, side, entryTs });
+
+      // avoid duplicates
+      const exists = (state.trades || []).some((t) => t.id === tradeId && t.status === 'OPEN');
+      if (!exists) {
+        const trade = {
+          id: tradeId,
+          symbol: signal.pair,
+          side,
+          entry: signal.price,
+          sl: signal.stopLoss,
+          tp: signal.takeProfit,
+          qty: null,
+          status: 'OPEN',
+          createdAt: entryTs,
+          meta: {
+            timeframe: signal.timeframe,
+            setup: signal.setup,
+            score: signal.score,
+            reason: signal.reason,
+          },
+        };
+        state.trades = [...(state.trades || []), trade];
+        saveOpenTrades(state);
+        appendTradeEvent({ event: 'entry_alert', id: tradeId, symbol: trade.symbol, side: trade.side, entryPrice: trade.entry, sl: trade.sl, tp: trade.tp });
+      }
+    }
+
     console.log(`📤 Sent alert for ${signal.pair}`);
   } catch (error) {
     const msg = error instanceof Error ? error.message : 'Unknown error';
