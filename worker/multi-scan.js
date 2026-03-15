@@ -191,7 +191,12 @@ async function run() {
 
   // Send alerts + register open trades for monitor
   const state = loadOpenTrades();
+  const openNow = new Set((state.trades || []).filter((t) => t.status === 'OPEN').map((t) => t.symbol));
+  const usedThisRun = new Set();
+
   for (const a of alerts.slice(0, CONFIG.scan.topAlerts)) {
+    // De-dup: only 1 trade per symbol at a time
+    if (openNow.has(a.symbol) || usedThisRun.has(a.symbol)) continue;
     const type = a.side === 'LONG' ? 'BUY' : 'SELL';
     const msg = [
       `[${CONFIG.scan.timeframe}][USDT-M] ${a.symbol} | ${type}`,
