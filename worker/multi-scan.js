@@ -7,6 +7,20 @@ import dotenv from 'dotenv';
 import { rankTop3 } from './multi-engine.js';
 import { loadOpenTrades, saveOpenTrades, appendTradeEvent, makeTradeId } from './state.js';
 
+function readJsonl(file) {
+  if (!fs.existsSync(file)) return [];
+  const lines = fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean);
+  const out = [];
+  for (const line of lines) {
+    try { out.push(JSON.parse(line)); } catch {}
+  }
+  return out;
+}
+
+function tradesJsonlPath() {
+  return path.join(__dirname, '..', 'data', 'trades.jsonl');
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -41,6 +55,9 @@ const CONFIG = {
     timeStopCandles: parseInt(process.env.TIME_STOP_CANDLES || '12', 10),
     feeBps: parseFloat(process.env.BT_FEE_BPS || '4'),
     minTrades: parseInt(process.env.BT_MIN_TRADES || '3', 10),
+  },
+  risk: {
+    lossSymbolCooldownMin: parseInt(process.env.LOSS_SYMBOL_COOLDOWN_MIN || '240', 10),
   },
 };
 
@@ -194,9 +211,23 @@ async function run() {
   const openNow = new Set((state.trades || []).filter((t) => t.status === 'OPEN').map((t) => t.symbol));
   const usedThisRun = new Set();
 
+  // Cooldown symbols that recently hit SL
+  const now = Date.now();
+  const cooldownMs = CONFIG.risk.lossSymbolCooldownMin * 60 * 1000;
+  const events = readJsonl(tradesJsonlPath());
+  const lastSL = new Map();
+  for (const e of events) {
+    if (e?.event === 'close_detected' && e?.hit === 'SL' && e?.symbol) {
+      const ts = Number(e.ts || 0);
+      if (!lastSL.has(e.symbol) || ts > lastSL.get(e.symbol)) lastSL.set(e.symbol, ts);
+    }
+  }
+
   for (const a of alerts.slice(0, CONFIG.scan.topAlerts)) {
     // De-dup: only 1 trade per symbol at a time
     if (openNow.has(a.symbol) || usedThisRun.has(a.symbol)) continue;
+    const slTs = lastSL.get(a.symbol);
+    if (slTs && now - slTs < cooldownMs) continue;
     const type = a.side === 'LONG' ? 'BUY' : 'SELL';
     const msg = [
       `[${CONFIG.scan.timeframe}][USDT-M] ${a.symbol} | ${type}`,
