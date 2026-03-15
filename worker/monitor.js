@@ -31,10 +31,17 @@ const CONFIG = {
 const api = axios.create({ timeout: 10000 });
 
 async function getLastPrice(symbol) {
-  const response = await api.get(`${CONFIG.binance.baseUrl}${CONFIG.binance.tickerPrice}`, {
-    params: { symbol },
-  });
-  return parseFloat(response.data?.price);
+  try {
+    const response = await api.get(`${CONFIG.binance.baseUrl}${CONFIG.binance.tickerPrice}`, {
+      params: { symbol },
+    });
+    return parseFloat(response.data?.price);
+  } catch (e) {
+    const status = e?.response?.status;
+    const url = e?.config?.url;
+    console.error(`getLastPrice failed symbol=${symbol} status=${status} url=${url}`);
+    throw e;
+  }
 }
 
 function formatCloseMessage(t) {
@@ -58,10 +65,16 @@ async function sendTelegram(text) {
     console.log('⚠️ Missing TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID; printing:', text);
     return;
   }
-  await api.post(CONFIG.telegram.apiUrl, {
-    chat_id: CONFIG.telegram.chatId,
-    text,
-  });
+  try {
+    await api.post(CONFIG.telegram.apiUrl, {
+      chat_id: CONFIG.telegram.chatId,
+      text,
+    });
+  } catch (e) {
+    const status = e?.response?.status;
+    console.error(`sendTelegram failed status=${status} url=${CONFIG.telegram.apiUrl}`);
+    throw e;
+  }
 }
 
 function estimatePnlUSDT({ side, entry, exit, qty }) {
@@ -73,8 +86,9 @@ async function runOnce() {
   const state = loadOpenTrades();
   const open = (state.trades || []).filter((t) => t.status === 'OPEN');
 
+  console.log(`🔎 Monitor: openTrades=${open.length}`);
+
   if (!open.length) {
-    console.log('ℹ️ No open trades to monitor.');
     return;
   }
 

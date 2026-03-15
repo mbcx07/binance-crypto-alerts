@@ -41,7 +41,10 @@ export function loadOpenTrades() {
 export function saveOpenTrades(state) {
   const file = openTradesFile();
   const safe = { trades: Array.isArray(state?.trades) ? state.trades : [] };
-  fs.writeFileSync(file, JSON.stringify(safe, null, 2));
+  // Atomic write to avoid partial reads while monitor runs frequently
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(safe, null, 2));
+  fs.renameSync(tmp, file);
 }
 
 export function appendTradeEvent(event) {
