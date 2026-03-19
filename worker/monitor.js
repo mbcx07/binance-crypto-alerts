@@ -126,6 +126,7 @@ async function runOnce() {
         hit,
         id: t.id,
         pnl,
+        strategyId: t.meta?.strategyId || null,
       });
 
       await sendTelegram(formatCloseMessage({

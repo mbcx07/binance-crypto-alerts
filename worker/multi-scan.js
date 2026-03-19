@@ -157,11 +157,38 @@ async function run() {
     config: CONFIG.bt,
   });
 
+  // Load live strategy stats (learning) to boost good performers and block bad ones
+  const statsPath = path.join(__dirname, '..', 'data', 'strategy-stats.json');
+  let strategyStats = new Map();
+  if (fs.existsSync(statsPath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(statsPath, 'utf8'));
+      const arr = parsed?.stats || [];
+      strategyStats = new Map(arr.map((s) => [s.strategyId, s]));
+    } catch {}
+  }
+
+  const ranked = (rank.ranked || []).filter((r) => {
+    const st = strategyStats.get(r.strategyId);
+    if (!st) return true; // no data yet
+    return !st.blocked;
+  }).map((r) => {
+    const st = strategyStats.get(r.strategyId);
+    const liveWin = st?.winrate;
+    const boost = typeof liveWin === 'number' ? Math.max(0.7, Math.min(1.3, 0.7 + liveWin)) : 1.0;
+    return { ...r, liveWinrate: liveWin ?? null, scoreAdj: r.expectancy * boost };
+  }).sort((a, b) => {
+    // Primary: adjusted score, then expectancy, then profit factor
+    if (b.scoreAdj !== a.scoreAdj) return b.scoreAdj - a.scoreAdj;
+    if (b.expectancy !== a.expectancy) return b.expectancy - a.expectancy;
+    return (b.profitFactor || 0) - (a.profitFactor || 0);
+  });
+
   // Convert ranked results into concrete trade alerts at last closed candle.
   // IMPORTANT: we only accept strategies with winrate >= BT_MIN_WINRATE.
   // Then we walk the ranked list until we build TOP_ALERTS actionable alerts.
   const alerts = [];
-  for (const r of (rank.ranked || rank.top3 || [])) {
+  for (const r of (ranked || rank.top3 || [])) {
     if (alerts.length >= CONFIG.scan.topAlerts) break;
     if (typeof r.winrate === 'number' && r.winrate < CONFIG.bt.minWinrate) continue;
     const kl = klinesBySymbol[r.symbol];
