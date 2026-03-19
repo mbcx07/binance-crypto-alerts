@@ -158,11 +158,12 @@ async function run() {
   });
 
   // Convert ranked results into concrete trade alerts at last closed candle.
-  // IMPORTANT: a strategy may backtest well but not have an active signal "now".
-  // We walk the ranked list until we build TOP_ALERTS actionable alerts.
+  // IMPORTANT: we only accept strategies with winrate >= BT_MIN_WINRATE.
+  // Then we walk the ranked list until we build TOP_ALERTS actionable alerts.
   const alerts = [];
   for (const r of (rank.ranked || rank.top3 || [])) {
     if (alerts.length >= CONFIG.scan.topAlerts) break;
+    if (typeof r.winrate === 'number' && r.winrate < CONFIG.bt.minWinrate) continue;
     const kl = klinesBySymbol[r.symbol];
     const last = kl[kl.length - 2];
     const entry = parseFloat(last[4]);
