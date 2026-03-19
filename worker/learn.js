@@ -64,11 +64,19 @@ async function run() {
   const since = Date.now() - CONFIG.windowHours * 3600 * 1000;
   const events = readJsonl(tradesFile()).filter((e) => (e.ts || 0) >= since);
 
+  // Build id -> strategyId map from entry_alerts (so we can attribute closes)
+  const idToStrategy = new Map();
+  for (const e of events) {
+    if (e.event === 'entry_alert' && e.id && e.strategyId) {
+      idToStrategy.set(e.id, e.strategyId);
+    }
+  }
+
   // Aggregate by strategyId using close_detected
   const by = new Map();
   for (const e of events) {
     if (e.event !== 'close_detected') continue;
-    const sid = e.strategyId || 'unknown';
+    const sid = e.strategyId || idToStrategy.get(e.id) || 'unknown';
     if (!by.has(sid)) by.set(sid, { strategyId: sid, closes: 0, wins: 0, losses: 0, lastTs: 0 });
     const s = by.get(sid);
     s.closes += 1;
