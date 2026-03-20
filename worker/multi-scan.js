@@ -61,7 +61,7 @@ const CONFIG = {
   },
 };
 
-const api = axios.create({ timeout: 15000 });
+const api = axios.create({ timeout: 30000 });
 
 async function sendTelegram(text) {
   if (!CONFIG.telegram.botToken || !CONFIG.telegram.chatId) {
