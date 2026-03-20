@@ -293,7 +293,8 @@ async function run() {
   }
   saveOpenTrades(state);
 
-  await sendTelegram(`ℹ️ MultiScan: universe=${universe.length} preselect=${top.length} strategies=50 candidates=${rank.candidates} alerts=${alerts.length}`);
+  // Background info messages disabled (Jefe requested only signals + closes)
+  // await sendTelegram(`ℹ️ MultiScan: universe=${universe.length} preselect=${top.length} strategies=50 candidates=${rank.candidates} alerts=${alerts.length}`);
 }
 
 run().catch(async (e) => {

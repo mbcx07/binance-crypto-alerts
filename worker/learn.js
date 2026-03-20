@@ -113,14 +113,15 @@ async function run() {
 
   atomicWrite(statsFile(), JSON.stringify({ ts: Date.now(), windowHours: CONFIG.windowHours, stats }, null, 2));
 
-  const top = stats.slice(0, 5);
-  const msg = [
-    '🧠 Learn update (por estrategia)',
-    `Ventana: ${CONFIG.windowHours}h | estrategias=${stats.length}`,
-    'Top 5:',
-    ...top.map((s) => `- ${s.strategyId}: closes=${s.closes} win=${(s.winrate*100).toFixed(1)}% PF≈${s.pf.toFixed(2)} blocked=${s.blocked}`),
-  ].join('\n');
-  await sendTelegram(msg);
+  // Background info messages disabled (Jefe requested only signals + closes)
+  // const top = stats.slice(0, 5);
+  // const msg = [
+  //   '🧠 Learn update (por estrategia)',
+  //   `Ventana: ${CONFIG.windowHours}h | estrategias=${stats.length}`,
+  //   'Top 5:',
+  //   ...top.map((s) => `- ${s.strategyId}: closes=${s.closes} win=${(s.winrate*100).toFixed(1)}% PF≈${s.pf.toFixed(2)} blocked=${s.blocked}`),
+  // ].join('\n');
+  // await sendTelegram(msg);
 }
 
 run().catch(async (e) => {

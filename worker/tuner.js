@@ -141,15 +141,15 @@ async function tune() {
 
   atomicWrite(envPath, lines.join('\n'));
 
-  const msg = [
-    '🛠️ Auto-tune (cada hora)',
-    `Ventana: 12h | Cierres=${s.closes} TP=${s.wins} SL=${s.losses} Winrate=${(s.winrate*100).toFixed(1)}% (target ${(target*100).toFixed(0)}%)`,
-    `Acción: ${action}`,
-    `Params: BT_MIN_WINRATE=${minWin.toFixed(2)} TOP_ALERTS=${topAlerts} PRESELECT_TOP=${preselectTop} ATR_MULT=${atrMult.toFixed(2)} TP_R=${tpR.toFixed(2)} COOLDOWN_MIN=${cooldown}`,
-    'Nota: cambios aplican a la siguiente corrida del scanner.',
-  ].join('\n');
-
-  await sendTelegram(msg);
+  // Background info messages disabled (Jefe requested only signals + closes)
+  // const msg = [
+  //   '🛠️ Auto-tune (cada hora)',
+  //   `Ventana: 12h | Cierres=${s.closes} TP=${s.wins} SL=${s.losses} Winrate=${(s.winrate*100).toFixed(1)}% (target ${(target*100).toFixed(0)}%)`,
+  //   `Acción: ${action}`,
+  //   `Params: BT_MIN_WINRATE=${minWin.toFixed(2)} TOP_ALERTS=${topAlerts} PRESELECT_TOP=${preselectTop} ATR_MULT=${atrMult.toFixed(2)} TP_R=${tpR.toFixed(2)} COOLDOWN_MIN=${cooldown}`,
+  //   'Nota: cambios aplican a la siguiente corrida del scanner.',
+  // ].join('\n');
+  // await sendTelegram(msg);
 }
 
 tune().catch(async (e) => {
