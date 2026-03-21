@@ -111,23 +111,23 @@ async function tune() {
   if (s.closes < minCloses) {
     // Encourage more selective + reduce overtrading
     minWin = clamp(minWin + 0.02, 0.65, 0.90);
-    topAlerts = clamp(topAlerts - 1, 1, 3);
+    topAlerts = clamp(topAlerts - 1, 1, 10);
     action = 'low_sample: tighten';
   } else if (s.winrate < target) {
     // Improve winrate: be MORE selective and MORE conservative on TP
     minWin = clamp(minWin + 0.03, 0.65, 0.92);
-    tpR = clamp(tpR - 0.10, 1.0, 1.6); // closer TP => higher winrate
-    atrMult = clamp(atrMult + 0.10, 0.9, 1.5); // a bit wider SL => fewer whipsaws
-    preselectTop = clamp(preselectTop - 5, 15, 30); // focus on best liquidity/conditions
-    topAlerts = clamp(topAlerts - 1, 1, 3);
+    tpR = clamp(tpR - 0.10, 1.0, 2.0); // closer TP => higher winrate
+    atrMult = clamp(atrMult + 0.10, 0.9, 1.8); // a bit wider SL => fewer whipsaws
+    preselectTop = clamp(preselectTop - 5, 15, 40); // focus on best liquidity/conditions
+    topAlerts = clamp(topAlerts - 1, 1, 10);
     cooldown = clamp(cooldown + 60, 120, 720);
     action = 'under_target: tighten+conservative';
   } else {
     // Doing well: allow slightly more opportunities
     minWin = clamp(minWin - 0.01, 0.60, 0.92);
     tpR = clamp(tpR + 0.05, 1.0, 2.0);
-    topAlerts = clamp(topAlerts + 1, 1, 3);
-    preselectTop = clamp(preselectTop + 5, 15, 40);
+    topAlerts = clamp(topAlerts + 1, 1, 10);
+    preselectTop = clamp(preselectTop + 5, 15, 50);
     action = 'over_target: loosen';
   }
 
