@@ -84,9 +84,9 @@ function estimatePnlUSDT({ side, entry, exit, qty }) {
 
 async function runOnce() {
   const state = loadOpenTrades();
-  const open = (state.trades || []).filter((t) => t.status === 'OPEN');
+  const open = (state.trades || []).filter((t) => t.status === 'OPEN' || t.status === 'ENTRY_PENDING');
 
-  console.log(`🔎 Monitor: openTrades=${open.length}`);
+  console.log(`🔎 Monitor: openTrades=${open.length} (including ENTRY_PENDING=${open.filter(t=>t.status==='ENTRY_PENDING').length})`);
 
   if (!open.length) {
     return;
@@ -99,6 +99,22 @@ async function runOnce() {
     try {
       const px = await getLastPrice(t.symbol);
       if (!Number.isFinite(px)) continue;
+
+      // Activate ENTRY_PENDING trades on first price check
+      if (t.status === 'ENTRY_PENDING') {
+        t.status = 'OPEN';
+        t.entry = px;
+        t.entryPrice = px;
+        changed = true;
+        console.log(`[${t.symbol}] Entry detected @ ${px}`);
+        await sendTelegram(
+          `📍 **Entrada registrada**\n` +
+          `📊 ${t.symbol} | ${t.side}\n` +
+          `💰 Entry: $${px.toFixed(6)}\n` +
+          `🛡️ SL: $${t.sl?.toFixed(6) || 'N/A'}\n` +
+          `🎯 TP: $${t.tp?.toFixed(6) || 'N/A'}`
+        );
+      }
 
       const hitTP = t.side === 'LONG' ? px >= t.tp : px <= t.tp;
       const hitSL = t.side === 'LONG' ? px <= t.sl : px >= t.sl;
