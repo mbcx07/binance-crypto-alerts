@@ -37,11 +37,11 @@ export function writeQueue(items) {
 }
 
 export function enqueueSignal(signal) {
-  // signal: { id, symbol, side, sl, tp, confidence, source, ts }
   const queue = readQueue();
-  // Avoid duplicates
-  if (queue.find((q) => q.symbol === signal.symbol && q.status === 'PENDING')) return;
-  queue.push({ ...signal, status: 'PENDING', validatedBy: null, validationReason: null });
+  // Avoid duplicates: same symbol with PENDING or recent (< 30 min)
+  const recent = Date.now() - 30 * 60 * 1000;
+  if (queue.find((q) => q.symbol === signal.symbol && (q.status === 'PENDING' || (q.ts || 0) > recent))) return;
+  queue.push({ ...signal, status: 'PENDING', validatedBy: null, validationReason: null, ts: signal.ts || Date.now() });
   writeQueue(queue);
 }
 

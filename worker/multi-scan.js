@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 
 import { rankTop3 } from './multi-engine.js';
 import { loadOpenTrades, saveOpenTrades, appendTradeEvent, makeTradeId } from './state.js';
+import { enqueueSignal } from './validate-queue.js';
 
 function readJsonl(file) {
   if (!fs.existsSync(file)) return [];
@@ -257,19 +258,27 @@ async function run() {
     const slTs = lastSL.get(a.symbol);
     if (slTs && now - slTs < cooldownMs) continue;
     const type = a.side === 'LONG' ? 'BUY' : 'SELL';
-    const msg = [
-      `[${CONFIG.scan.timeframe}][USDT-M] ${a.symbol} | ${type}`,
-      `💰 Entry: ${a.entry.toFixed(6)}`,
-      `🛑 Stop Loss: ${a.sl.toFixed(6)}`,
-      `🎯 Take Profit: ${a.tp.toFixed(6)}`,
-      `📊 R:R = ${a.rr.toFixed(2)}`,
-      `⭐ Score: ${a.stats.expectancy.toFixed(6)} | strat=${a.strategyId} | trades=${a.stats.trades} win=${(a.stats.winrate*100).toFixed(1)}% PF=${a.stats.profitFactor.toFixed(2)} DD=${a.stats.maxDD.toFixed(6)}`,
-    ].join('\n');
 
-    await sendTelegram(msg);
-
+    // Generate trade ID before saving to state
     const entryTs = Date.now();
     const id = makeTradeId({ symbol: a.symbol, side: a.side, entryTs });
+
+    // Enqueue for Pia validation — NOT sent directly anymore
+    enqueueSignal({
+      id,
+      symbol: a.symbol,
+      side: a.side,
+      entry: a.entry,
+      sl: a.sl,
+      tp: a.tp,
+      rr: a.rr,
+      strategyId: a.strategyId,
+      source: 'Strategy',
+      confidence: a.stats.winrate || 0.5,
+      ts: entryTs,
+    });
+
+
 
     state.trades = [
       ...(state.trades || []),

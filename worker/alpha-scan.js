@@ -1,5 +1,13 @@
 /**
- * AlphaSight — AI vision chart analysis for Binance crypto trading.
+ * AlphaSight — Disabled: llava requires GPU for real-time use.
+ * REPLACED BY: validate-queue.js + Pia heartbeat validation.
+ * Signals from multi-scan.js go to validate-queue.json → Pia validates via web search.
+ *
+ * To re-enable vision: set OLLAMA_VISION_MODEL=llava in .env and ensure GPU.
+ */
+console.log('[AlphaSight] DISABLED — llava too slow on CPU (needs GPU). Using indicator-based signals + Pia web validation instead.');
+process.exit(0);
+
  *
  * Pipeline:
  *  1. Screener → top N symbols by volume/change
