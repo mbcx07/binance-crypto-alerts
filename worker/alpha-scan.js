@@ -47,7 +47,7 @@ const CONFIG = {
   timeframe: process.env.SCAN_TIMEFRAME || '15m',
   lookbackCandles: parseInt(process.env.ALPHA_LOOKBACK || '80', 10),
   minConfidence: parseFloat(process.env.ALPHA_MIN_CONFIDENCE || '0.70'),
-};
+  topAlerts: 20, // mantener 20 señales en cola para cuando abran nuevas
 
 const api = axios.create({ timeout: 30000 });
 

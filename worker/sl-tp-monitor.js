@@ -47,9 +47,7 @@ async function main() {
     const entry    = parseFloat(pos.entryPrice);
 
     const markPrice = await getMarkPrice(symbol);
-    const atr       = await getATR(symbol);
 
-    if (!atr) continue;
 
     const slPrice = side === 'LONG' ? entry - (entry * 0.02) : entry + (entry * 0.02);
     const tpPrice = side === 'LONG' ? entry + (entry * 0.05) : entry - (entry * 0.05);

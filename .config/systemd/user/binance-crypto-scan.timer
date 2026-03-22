@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Binance Crypto Scan every 60 seconds
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+Unit=binance-crypto-scan.service
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
