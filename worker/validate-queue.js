@@ -73,7 +73,7 @@ export function markConfirmedAsTrade(id) {
   const signal = queue.find((q) => q.id === id);
   if (!signal) return;
 
-  let openTrades = [];
+  let openTrades = { trades: [] };
   if (fs.existsSync(OPEN_TRADES_FILE)) {
     try { openTrades = JSON.parse(fs.readFileSync(OPEN_TRADES_FILE, 'utf8')); } catch {}
   }
@@ -83,16 +83,16 @@ export function markConfirmedAsTrade(id) {
     id: tradeId,
     symbol: signal.symbol,
     side: signal.side,
-    entry: null,           // Monitor will fill on first price check
+    entry: null,
     entryPrice: null,
     sl: signal.sl,
     tp: signal.tp,
-    status: 'ENTRY_PENDING',
+    status: 'OPEN',
     ts: Date.now(),
     meta: { strategyId: signal.source, confidence: signal.confidence },
   };
 
-  openTrades.push(trade);
+  openTrades.trades.push(trade);
   fs.writeFileSync(OPEN_TRADES_FILE, JSON.stringify(openTrades, null, 2));
 }
 

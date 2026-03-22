@@ -16,6 +16,35 @@ export function computeEMA(values, period) {
   return ema;
 }
 
+// Alias minúscula para compatibilidad con estrategias que usan ambos nombres
+export const computeEma = computeEMA;
+
+export function computeEmaSeries(values, period) {
+  if (!values || values.length < period) return null;
+  const k = 2 / (period + 1);
+  const ema = [values[0]];
+  for (let i = 1; i < values.length; i++) {
+    ema.push(values[i] * k + ema[i - 1] * (1 - k));
+  }
+  return ema;
+}
+
+export function computeAtr(highs, lows, closes, period = 14) {
+  if (!highs || !lows || !closes || highs.length < period + 2) return null;
+  const trs = [];
+  for (let i = 1; i < closes.length; i++) {
+    const hl  = highs[i]  - lows[i];
+    const hpc  = Math.abs(highs[i]  - closes[i - 1]);
+    const lpc  = Math.abs(lows[i]   - closes[i - 1]);
+    trs.push(Math.max(hl, hpc, lpc));
+  }
+  const slice = trs.slice(-period);
+  const k = 2 / (period + 1);
+  let atr = slice[0];
+  for (let i = 1; i < slice.length; i++) atr = slice[i] * k + atr * (1 - k);
+  return atr;
+}
+
 export function computeRSI(values, period = 14) {
   if (!values || values.length < period + 1) return null;
   let gains = 0;
@@ -228,6 +257,72 @@ export function buildStrategies50() {
     });
   }
 
-  if (list.length !== 52) throw new Error(`Expected 52 strategies, got ${list.length}`);
+  // ─── PRO EMA Bounce TV ─────────────────────────────────────
+  // Lógica extraída del Pine Script de TradingView
+  // Condiciones: EMA8 < EMA14 < EMA50 (bajando) = Filtro BAJ
+  // Entrada SHORT: precio toca EMA y rebota hacia abajo (rechazo)
+  // SL: ATR×1.5 sobre el rebote / TP: en soporte visible
+  list.push({
+    id: 'pro_ema_bounce_tv',
+    name: 'PRO EMA Bounce TV',
+    family: 'ema_bounce',
+    ui: { color: '#6a5acd', label: 'PEB-TV' },
+    params: {},
+    signal(closes, highs, lows) {
+      if (!closes || closes.length < 60) return null;
+      const e8  = computeEma(closes, 8);
+      const e14 = computeEma(closes, 14);
+      const e50 = computeEma(closes, 50);
+      const atr  = computeAtr(highs, lows, closes, 14);
+      if (!e8 || !e14 || !e50 || !atr) return null;
+
+      // EMA series (últimos 5 valores) para verificar dirección
+      const e8s  = computeEmaSeries(closes, 8);
+      const e14s = computeEmaSeries(closes, 14);
+      const e50s = computeEmaSeries(closes, 50);
+      const c   = closes.at(-1);
+      const h   = highs.at(-1);
+      const l   = lows.at(-1);
+      const a   = atr;
+
+      // Filtro BAJ: EMA50 cayendo + precio debajo
+      const ema50Falling    = e50s.at(-1) < e50s.at(-5);
+      const priceBelowEma50  = c < e50;
+
+      // Alineación bear: EMA8 < EMA14 < EMA50 (todos bajando)
+      const bearAlign =
+        e8 < e14 && e14 < e50 &&
+        e8s.at(-1) < e8s.at(-2) && e14s.at(-1) < e14s.at(-2);
+
+      // Rebote: precio anterior cerró cerca de EMA (within 0.8 ATR)
+      const prev   = closes.at(-2);
+      const prev2  = closes.at(-3);
+      const nearEma = Math.min(
+        Math.abs(prev  - e8s.at(-2)),
+        Math.abs(prev  - e14s.at(-2)),
+        Math.abs(prev2 - e8s.at(-3)),
+        Math.abs(prev2 - e14s.at(-3))
+      );
+      const touchEma = nearEma < a * 0.8;
+
+      // Rechazo: high supera EMA pero cierre gira hacia abajo
+      const rejectUp = h > e8 && c < e8;
+
+      const short = bearAlign && ema50Falling && priceBelowEma50 && touchEma && rejectUp;
+
+      // LONG
+      const ema50Rising     = e50s.at(-1) > e50s.at(-5);
+      const priceAboveEma50 = c > e50;
+      const bullAlign =
+        e8 > e14 && e14 > e50 &&
+        e8s.at(-1) > e8s.at(-2) && e14s.at(-1) > e14s.at(-2);
+      const rejectDown = l < e8 && c > e8;
+      const long = bullAlign && ema50Rising && priceAboveEma50 && touchEma && rejectDown;
+
+      return short ? 'SHORT' : long ? 'LONG' : null;
+    },
+  });
+
+  if (list.length !== 53) throw new Error(`Expected 53 strategies, got ${list.length}`);
   return list;
 }

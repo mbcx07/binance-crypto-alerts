@@ -382,3 +382,8 @@ function indicatorDecision(symbol, last, prev, rsiVal, ema8V, ema14V, ema50V, at
 }
 
 
+
+main().catch((e) => {
+  console.error('[AlphaSight] Fatal:', e.message);
+  process.exitCode = 1;
+});

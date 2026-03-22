@@ -1,0 +1,12 @@
+[Unit]
+Description=Binance Crypto Alerts - SL/TP Monitor (every 30s)
+PartOf=binance-crypto-sltp.timer
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/moises-beltran-castro/.openclaw/workspace/binance-crypto-alerts/worker
+ExecStart=/usr/bin/node /home/moises-beltran-castro/.openclaw/workspace/binance-crypto-alerts/worker/sl-tp-monitor.js
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=binance-crypto-sltp.timer

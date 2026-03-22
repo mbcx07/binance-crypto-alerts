@@ -62,8 +62,17 @@ export async function getBalance() {
 }
 
 export async function getPosition(symbol) {
+  if (!symbol) {
+    const data = await signedRequest('GET', '/fapi/v2/positionRisk', {});
+    return data.filter(p => Math.abs(parseFloat(p.positionAmt || 0)) > 0);
+  }
   const data = await signedRequest('GET', '/fapi/v2/positionRisk', { symbol });
   return data[0] || null;
+}
+
+export async function getAllPositions() {
+  const data = await signedRequest('GET', '/fapi/v2/positionRisk', {});
+  return data.filter(p => Math.abs(parseFloat(p.positionAmt || 0)) > 0);
 }
 
 export async function setLeverage(symbol, leverage) {
@@ -117,7 +126,6 @@ export async function openPosition({ symbol, side, sl, tp, entryPrice }) {
   console.log(`[Trader] Setting leverage ${leverage}x for ${symbol} (max allowed: ${maxLeverage}x)`);
 
   await setLeverage(symbol, leverage);
-  await setCrossMarginMode(symbol);
 
   // Cantidad en contratos
   const price = entryPrice || await getPrice(symbol);
@@ -126,29 +134,35 @@ export async function openPosition({ symbol, side, sl, tp, entryPrice }) {
   // Redondear segun precision del simbolo
   const lotSizeFilter = symInfo.filters.find(f => f.filterType === 'LOT_SIZE');
   const stepSize = parseFloat(lotSizeFilter?.stepSize || '1');
+  const minQty = parseFloat(lotSizeFilter?.minQty || '0');
   const qtyPrecision = stepSize < 1 ? Math.ceil(-Math.log10(stepSize)) : 0;
-  const qtyRounded = Math.floor(qty / stepSize) * stepSize;
+  let qtyRounded = Math.floor(qty / stepSize) * stepSize;
 
-  if (qtyRounded < parseFloat(lotSizeFilter?.minQty || '0')) {
-    console.error(`[Trader] Quantity ${qtyRounded} below min ${lotSizeFilter.minQty}`);
+  if (qtyRounded < minQty) {
+    console.error(`[Trader] Quantity ${qtyRounded} below min ${minQty}`);
     return null;
   }
 
-  console.log(`[Trader] Opening ${side} ${symbol} | Qty: ${qtyRounded} | Entry: ${price} | SL: ${sl} | TP: ${tp}`);
+  // Verificar notional >= $5 (minimo de Binance)
+  const notional = qtyRounded * price;
+  if (notional < 5) {
+    console.error(`[Trader] Notional ${notional.toFixed(2)} < $5 minimum. Increase position size.`);
+    return null;
+  }
+
+  console.log(`[Trader] Opening ${side} ${symbol} | Qty: ${qtyRounded} | Notional: $${notional.toFixed(2)} | Entry: ${price}`);
 
   if (TEST_MODE) {
     console.log(`[Trader] TEST MODE - no real order placed`);
     return { test: true, symbol, side, qty: qtyRounded, price, sl, tp };
   }
 
-  // ─── Market order ─────────────────────────────────────────────────────────
+  // ─── Market order (One-Way mode — no positionSide) ────────────────────────
   const orderSide = side === 'LONG' ? 'BUY' : 'SELL';
-  const positionSide = side === 'LONG' ? 'LONG' : 'SHORT';
 
   const marketOrder = await signedRequest('POST', '/fapi/v1/order', {
     symbol,
     side: orderSide,
-    positionSide,
     type: 'MARKET',
     quantity: qtyRounded.toFixed(qtyPrecision),
   });
@@ -156,36 +170,38 @@ export async function openPosition({ symbol, side, sl, tp, entryPrice }) {
   console.log(`[Trader] Market order filled: ${marketOrder.orderId}`);
   const fillPrice = parseFloat(marketOrder.avgPrice || price);
 
-  // ─── SL order (stop loss market) ─────────────────────────────────────────
+  // ─── SL order (stop loss algo) ─────────────────────────────────────────────
   const slOrderSide = side === 'LONG' ? 'SELL' : 'BUY';
 
   try {
-    await signedRequest('POST', '/fapi/v1/order', {
+    await signedRequest('POST', '/fapi/v1/algoOrders', {
       symbol,
       side: slOrderSide,
-      positionSide,
-      type: 'STOP_MARKET',
+      orderType: 'STOP',
+      price: sl.toFixed(6),
       stopPrice: sl.toFixed(6),
       quantity: qtyRounded.toFixed(qtyPrecision),
       reduceOnly: true,
+      timeInForce: 'GTE_GTC',
     });
     console.log(`[Trader] SL set at ${sl}`);
   } catch (e) {
     console.error(`[Trader] Failed to set SL: ${e.message}`);
   }
 
-  // ─── TP order (take profit market) ──────────────────────────────────────
+  // ─── TP order (take profit algo) ──────────────────────────────────────────
   const tpOrderSide = side === 'LONG' ? 'SELL' : 'BUY';
 
   try {
-    await signedRequest('POST', '/fapi/v1/order', {
+    await signedRequest('POST', '/fapi/v1/algoOrders', {
       symbol,
       side: tpOrderSide,
-      positionSide,
-      type: 'TAKE_PROFIT_MARKET',
+      orderType: 'STOP',
+      price: tp.toFixed(6),
       stopPrice: tp.toFixed(6),
       quantity: qtyRounded.toFixed(qtyPrecision),
       reduceOnly: true,
+      timeInForce: 'GTE_GTC',
     });
     console.log(`[Trader] TP set at ${tp}`);
   } catch (e) {
@@ -198,6 +214,7 @@ export async function openPosition({ symbol, side, sl, tp, entryPrice }) {
     side,
     qty: qtyRounded,
     entryPrice: fillPrice,
+    notional,
     sl,
     tp,
     leverage,

@@ -1,0 +1,13 @@
+[Unit]
+Description=Binance Crypto Alerts - Position Monitor (fills up to 10 open positions)
+PartOf=binance-crypto-alpha.timer
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/moises-beltran-castro/.openclaw/workspace/binance-crypto-alerts/worker
+ExecStart=/usr/bin/node /home/moises-beltran-castro/.openclaw/workspace/binance-crypto-alerts/worker/position-monitor.js
+Environment=NODE_ENV=production
+Restart=no
+
+[Install]
+WantedBy=binance-crypto-alpha.timer
