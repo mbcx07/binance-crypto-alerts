@@ -1,0 +1,14 @@
+[Unit]
+Description=Binance Crypto Alerts - Trailing SL/TP Monitor
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/home/moises-beltran-castro/.openclaw/workspace/binance-crypto-alerts/worker
+ExecStart=/usr/bin/node /home/moises-beltran-castro/.openclaw/workspace/binance-crypto-alerts/worker/sl-tp-monitor.js
+Environment=NODE_ENV=production
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=default.target

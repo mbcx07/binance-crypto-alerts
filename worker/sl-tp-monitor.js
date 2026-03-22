@@ -181,4 +181,22 @@ async function main() {
   if (changed) saveTrailState(trail);
 }
 
-main().catch(e => { console.error('[TrailingSL] Fatal:', e.message); process.exitCode = 1; });
+async function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function runLoop() {
+  while (true) {
+    try {
+      await main();
+    } catch (e) {
+      console.error('[TrailingSL] Error in loop:', e.message);
+    }
+    await sleep(1000); // 1 second between checks
+  }
+}
+
+runLoop().catch(e => {
+  console.error('[TrailingSL] Fatal:', e.message);
+  process.exit(1);
+});
