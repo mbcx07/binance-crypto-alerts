@@ -36,7 +36,7 @@ const CONFIG = {
     minVolume: 5000000, // 5M USDT minimum 24h volume
 
     // Output
-    topSignals: 5, // señales a mandar por corrida (ajustable)
+    topSignals: 10, // señales a mandar por corrida (ajustable)
     cooldownMinutes: 60,
 
     // Wyckoff PV + Liquidez (setup base: sweep + test)
@@ -47,12 +47,19 @@ const CONFIG = {
     testMaxBarsAfterSweep: 12, // cuántas velas después del sweep aceptamos un TEST
 
     // Wyckoff confirmation (reduce false positives)
-    // Idea: primero Spring/UTAD (trampa de liquidez), luego confirmar con SOS/SOW (follow-through)
+    // Idea: primero Spring/UTAD (trampa de liquidez), luego confirmar con fuerza/debilidad.
+    // Modes:
+    // - "sos": require SOS/SOW breakout+follow-through
+    // - "soft": require reclaim/hold of sweep level + volume confirmation
+    // - "both" (default): accept sos OR soft
     confirmEnabled: (process.env.WYCKOFF_CONFIRM_ENABLED || 'true').toLowerCase() !== 'false',
+    confirmMode: (process.env.WYCKOFF_CONFIRM_MODE || 'both').toLowerCase(),
     confirmLookback: parseInt(process.env.WYCKOFF_CONFIRM_LOOKBACK || '80', 10),
     confirmBreakoutPct: parseFloat(process.env.WYCKOFF_CONFIRM_BREAKOUT_PCT || '0.0015'), // 0.15%
     sosVolRatioMin: parseFloat(process.env.WYCKOFF_SOS_VOL_RATIO_MIN || '1.2'),
     followThroughBars: parseInt(process.env.WYCKOFF_FOLLOW_THROUGH_BARS || '2', 10), // require last N closes beyond level
+    softReclaimPct: parseFloat(process.env.WYCKOFF_SOFT_RECLAIM_PCT || '0.0000'),
+    softVolRatioMin: parseFloat(process.env.WYCKOFF_SOFT_VOL_RATIO_MIN || '1.0'),
 
     // Helpers
     concurrency: 5,
@@ -308,41 +315,65 @@ function lastNClosesBeyondLevel(klines, lastClosedIdx, n, level, direction) {
   return ok;
 }
 
-function detectWyckoffConfirmSOSorSOW(klines, setupDirection, cfg) {
-  // Approximate SOS/SOW confirmation:
-  // - Define a range level using recent highs/lows (lookback) excluding the last forming candle.
-  // - Require last N closes beyond the level (follow-through)
-  // - Require volume ratio >= threshold on the most recent closed candle.
+function detectWyckoffConfirmSOSorSOW(klines, setupDirection, cfg, setupMeta = {}) {
+  // Confirmation to reduce false positives.
+  // Modes:
+  // - sos: breakout+follow-through vs recent range extreme
+  // - soft: reclaim/hold sweepLevel (from setup) + volume confirmation
+  // - both: accept sos OR soft
   if (!cfg?.confirmEnabled) return { ok: true, reason: 'confirm_disabled' };
 
+  const mode = (cfg.confirmMode || 'both').toLowerCase();
   const lastClosedIdx = klines.length - 2;
-  const lookback = Math.min(cfg.confirmLookback || 80, lastClosedIdx - 1);
-  if (lookback < 30) return { ok: false, reason: 'insufficient_lookback' };
-
-  const start = Math.max(0, lastClosedIdx - lookback);
-  const window = klines.slice(start, lastClosedIdx); // exclude lastClosed candle to avoid self-referencing
-  const highs = window.map((k) => parseFloat(k[2]));
-  const lows = window.map((k) => parseFloat(k[3]));
-  const rangeHigh = Math.max(...highs);
-  const rangeLow = Math.min(...lows);
-
-  const lastClose = parseFloat(klines[lastClosedIdx][4]);
   const { volRatio } = computeVolRatio(klines, cfg.volAvgN || 20, lastClosedIdx);
 
-  const breakoutPct = cfg.confirmBreakoutPct ?? 0.0015;
-  const ft = Math.max(1, cfg.followThroughBars || 2);
+  const trySoft = () => {
+    const sweepLevel = setupMeta?.sweepLevel;
+    if (typeof sweepLevel !== 'number') return { ok: false, reason: 'soft:no_sweepLevel' };
+    const reclaimPct = cfg.softReclaimPct ?? 0;
+    const level = setupDirection === 'LONG'
+      ? sweepLevel * (1 + reclaimPct)
+      : sweepLevel * (1 - reclaimPct);
+    const lastClose = parseFloat(klines[lastClosedIdx][4]);
+    const holdOk = setupDirection === 'LONG' ? lastClose > level : lastClose < level;
+    const volOk = volRatio >= (cfg.softVolRatioMin || 1.0);
+    return { ok: holdOk && volOk, reason: `soft(hold=${holdOk} volRatio=${volRatio.toFixed(2)})`, level, volRatio };
+  };
 
-  if (setupDirection === 'LONG') {
-    const level = rangeHigh * (1 + breakoutPct);
-    const ftOk = lastNClosesBeyondLevel(klines, lastClosedIdx, ft, level, 'LONG');
+  const trySOS = () => {
+    const lookback = Math.min(cfg.confirmLookback || 80, lastClosedIdx - 1);
+    if (lookback < 30) return { ok: false, reason: 'sos:insufficient_lookback' };
+
+    const start = Math.max(0, lastClosedIdx - lookback);
+    const window = klines.slice(start, lastClosedIdx); // exclude lastClosed candle
+    const highs = window.map((k) => parseFloat(k[2]));
+    const lows = window.map((k) => parseFloat(k[3]));
+    const rangeHigh = Math.max(...highs);
+    const rangeLow = Math.min(...lows);
+
+    const breakoutPct = cfg.confirmBreakoutPct ?? 0.0015;
+    const ft = Math.max(1, cfg.followThroughBars || 2);
+
+    if (setupDirection === 'LONG') {
+      const level = rangeHigh * (1 + breakoutPct);
+      const ftOk = lastNClosesBeyondLevel(klines, lastClosedIdx, ft, level, 'LONG');
+      const volOk = volRatio >= (cfg.sosVolRatioMin || 1.2);
+      return { ok: ftOk && volOk, reason: `SOS(ft=${ftOk} volRatio=${volRatio.toFixed(2)})`, level, volRatio };
+    }
+
+    const level = rangeLow * (1 - breakoutPct);
+    const ftOk = lastNClosesBeyondLevel(klines, lastClosedIdx, ft, level, 'SHORT');
     const volOk = volRatio >= (cfg.sosVolRatioMin || 1.2);
-    return { ok: ftOk && volOk, reason: `SOS(level>${level.toFixed(4)} ft=${ftOk} volRatio=${volRatio.toFixed(2)})`, level, volRatio };
-  }
+    return { ok: ftOk && volOk, reason: `SOW(ft=${ftOk} volRatio=${volRatio.toFixed(2)})`, level, volRatio };
+  };
 
-  const level = rangeLow * (1 - breakoutPct);
-  const ftOk = lastNClosesBeyondLevel(klines, lastClosedIdx, ft, level, 'SHORT');
-  const volOk = volRatio >= (cfg.sosVolRatioMin || 1.2);
-  return { ok: ftOk && volOk, reason: `SOW(level<${level.toFixed(4)} ft=${ftOk} volRatio=${volRatio.toFixed(2)})`, level, volRatio };
+  const soft = (mode === 'soft' || mode === 'both') ? trySoft() : { ok: false, reason: 'soft:disabled' };
+  const sos = (mode === 'sos' || mode === 'both') ? trySOS() : { ok: false, reason: 'sos:disabled' };
+
+  if (mode === 'soft') return soft;
+  if (mode === 'sos') return sos;
+  // both
+  return soft.ok ? { ...soft, reason: `soft_ok ${soft.reason}` } : sos.ok ? { ...sos, reason: `sos_ok ${sos.reason}` } : { ok: false, reason: `confirm_fail(${soft.reason}; ${sos.reason})` };
 }
 
 function detectSetupWyckoffPV(klines, cfg) {
@@ -595,7 +626,7 @@ async function scanSignals() {
 
     // Wyckoff confirm step: require SOS/SOW follow-through after Spring/UT/ICE setups.
     // Priority (per Jefe): Spring/UTAD first, then confirm strength/weakness.
-    const confirm = detectWyckoffConfirmSOSorSOW(klines, setup.direction, CONFIG.scanner);
+    const confirm = detectWyckoffConfirmSOSorSOW(klines, setup.direction, CONFIG.scanner, setup.meta);
     if (!confirm.ok) {
       stats.skipped.confirmFail++;
       return null;
@@ -645,20 +676,37 @@ async function scanSignals() {
       4 + Math.min(3, setup.meta.sweepVolRatio || 0) + Math.max(0, 2 - (setup.meta.testVolRatio || 0))
     );
 
+    // SL/TP (ATR-based) for manual execution + monitoring
+    const atr = computeATR(klines, CONFIG.trading.atrPeriod);
+    if (!atr || atr <= 0) {
+      // We require SL/TP for manual execution; skip if ATR unavailable.
+      return null;
+    }
+    const stopDist = atr * CONFIG.trading.atrMult;
+    const tpDist = stopDist * CONFIG.trading.takeProfitR;
+
+    const stopLoss = wantsLong ? price - stopDist : price + stopDist;
+    const takeProfit = wantsLong ? price + tpDist : price - tpDist;
+
+    const ts = Date.now();
+
     stats.produced++;
     return {
-      id: `${symbol}-${Date.now()}`,
+      id: `${symbol}-${ts}`,
       pair: symbol,
       type: wantsLong ? 'BUY' : 'SELL',
       setup: setup.setup,
       timeframe: CONFIG.scanner.timeframe,
       price,
+      stopLoss,
+      takeProfit,
+      rr: CONFIG.trading.takeProfitR,
       score,
       reason: `${setup.reason} + ${confirm.reason}`,
-      timestamp: Date.now(),
+      timestamp: ts,
       volume24h: symbolObj.ticker.quoteVolume,
       tickerLastPrice: parseFloat(symbolObj.ticker.lastPrice || '0') || null,
-      meta: { ...(setup.meta || {}), emaTrend, atrPct, wyckoffConfirm: confirm },
+      meta: { ...(setup.meta || {}), emaTrend, atrPct, atr, wyckoffConfirm: confirm },
     };
   });
 
@@ -708,21 +756,26 @@ async function scanSignals() {
 // TELEGRAM NOTIFICATIONS
 // ===============================
 function formatTelegramMessage(signal) {
-  const parts = [
-    `[${signal.timeframe}][USDT-M] ${signal.pair}`,
-    `${signal.type} (${signal.setup})`,
-    `candleClose=${signal.price.toFixed(4)}`,
-    signal.tickerLastPrice ? `tickerLast=${signal.tickerLastPrice.toFixed(4)}` : null,
-    signal.meta?.emaTrend ? `EMA(${CONFIG.trading.trendEmaPeriod})=${Number(signal.meta.emaTrend).toFixed(4)}` : null,
-    typeof signal.meta?.atrPct === 'number' ? `ATR%=${(signal.meta.atrPct * 100).toFixed(2)}%` : null,
-    `score=${signal.score.toFixed(1)}`,
-    `vol24h=${(signal.volume24h / 1_000_000).toFixed(1)}M`,
-    `volRatio(test)=${(signal.meta?.testVolRatio ?? 0).toFixed(2)}`,
-    `reason=${signal.reason}`,
-    new Date(signal.timestamp).toISOString(),
-  ];
+  // Belastrader-style message (Entry/SL/TP/RR)
+  const lines = [];
+  lines.push(`[${signal.timeframe}][USDT-M] ${signal.pair} | ${signal.type}`);
+  lines.push(`💰 Entry: ${signal.price.toFixed(6)}`);
 
-  return parts.filter(Boolean).join(' | ');
+  if (typeof signal.stopLoss === 'number' && typeof signal.takeProfit === 'number') {
+    lines.push(`🛑 Stop Loss: ${signal.stopLoss.toFixed(6)}`);
+    lines.push(`🎯 Take Profit: ${signal.takeProfit.toFixed(6)}`);
+  }
+  if (typeof signal.rr === 'number') {
+    lines.push(`📊 R:R = ${signal.rr.toFixed(2)}`);
+  }
+
+  const tags = [];
+  if (typeof signal.meta?.sweepVolRatio === 'number') tags.push(`volSpike(${signal.meta.sweepVolRatio.toFixed(1)})`);
+  if (signal.meta?.emaTrend) tags.push('trend');
+  if (typeof signal.meta?.atrPct === 'number') tags.push('ATR');
+
+  lines.push(`⭐ Score: ${signal.score.toFixed(1)} | ${tags.join('+') || signal.reason}`);
+  return lines.join('\n');
 }
 
 async function sendTelegramAlert(signal) {
