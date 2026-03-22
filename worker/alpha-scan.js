@@ -292,8 +292,9 @@ function indicatorDecision(symbol, last, prev, rsiVal, ema8V, ema14V, ema50V, at
 
   if (!decision) return null;
 
-  const slDist = atrVal * 1.5;
-  const tpDist = atrVal * 2.5;
+  // SL = ATR × 1.8 — TP = SL × 2.0 (RR = 1:2)
+  const slDist = atrVal * 1.8;
+  const tpDist  = slDist * 2.0;   // ganancia doble del riesgo
   const sl = decision === 'LONG' ? last - slDist : last + slDist;
   const tp = decision === 'LONG' ? last + tpDist : last - tpDist;
 
