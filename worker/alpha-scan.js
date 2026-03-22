@@ -122,13 +122,93 @@ async function fetchKlines(symbol, interval = '15m', limit = 100) {
   return data;
 }
 
+// ─── Top symbols (from backtest) ──────────────────────────────────────────────
+
+const TOP10_LIST = (CONFIG.alphaTopSymbols || '').split(',').filter(Boolean);
+
 async function fetchTopSymbols(limit = 20) {
-  const { data } = await api.get(`${CONFIG.binance.baseUrl}${CONFIG.binance.ticker}`);
+  const { data } = await axios.get(`${CONFIG.binance.baseUrl}${CONFIG.binance.ticker}`);
   return data
     .filter((t) => t.symbol.endsWith('USDT'))
     .sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume))
     .slice(0, limit)
     .map((t) => t.symbol);
+}
+
+// Analyze a single symbol and return result or null
+async function analyzeOne(symbol) {
+  const result = await analyzeSymbol(symbol);
+  if (!result) return null;
+  if (
+    (result.decision === 'LONG' || result.decision === 'SHORT') &&
+    result.confidence >= CONFIG.minConfidence
+  ) {
+    return {
+      id: `alpha_${symbol}_${result.ts}`,
+      symbol,
+      side: result.decision,
+      sl: result.sl,
+      tp: result.tp,
+      confidence: result.confidence,
+      source: 'AlphaSight',
+      ts: result.ts,
+      reason: result.reason,
+    };
+  }
+  return null;
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+async function main() {
+  ensureDir(CONFIG.alphaDir);
+
+  // Part 1: Top 10 from backtest
+  const top10Signals = [];
+  if (TOP10_LIST.length) {
+    console.log(`[AlphaSight] Scanning TOP 10 (backtest winners)...`);
+    for (const symbol of TOP10_LIST) {
+      const sig = await analyzeOne(symbol);
+      if (sig) {
+        top10Signals.push(sig);
+        console.log(`[AlphaSight] TOP10 ${sig.side} ${symbol} (conf ${(sig.confidence*100).toFixed(0)}%)`);
+      } else {
+        console.log(`[AlphaSight] TOP10 ${symbol}: no signal`);
+      }
+    }
+  }
+
+  // Part 2: Full universe scan (top symbols by volume)
+  const universeSignals = [];
+  try {
+    const universe = await fetchTopSymbols(CONFIG.symbolsToAnalyze);
+    console.log(`[AlphaSight] Scanning universe: ${universe.length} symbols...`);
+    for (const symbol of universe) {
+      if (TOP10_LIST.includes(symbol)) continue; // skip duplicates
+      const sig = await analyzeOne(symbol);
+      if (sig) {
+        universeSignals.push(sig);
+        console.log(`[AlphaSight] UNIV ${sig.side} ${symbol} (conf ${(sig.confidence*100).toFixed(0)}%)`);
+      }
+    }
+  } catch (err) {
+    console.error('Screener failed:', err.message);
+  }
+
+  // Combine and rank by confidence
+  const allSignals = [...top10Signals, ...universeSignals];
+  allSignals.sort((a, b) => b.confidence - a.confidence);
+  const finalTop = allSignals.slice(0, CONFIG.topAlerts);
+
+  // Enqueue and send Telegram
+  let enqueued = 0;
+  for (const sig of finalTop) {
+    enqueueSignal(sig);
+    enqueued++;
+    console.log(`[AlphaSight] ✅ ${sig.side} ${sig.symbol} (conf ${(sig.confidence*100).toFixed(0)}%) → queued`);
+  }
+
+  console.log(`[AlphaSight] Done: ${enqueued} signals enqueued for validation (${top10Signals.length} from TOP10, ${universeSignals.length} from universe)`);
 }
 
 async function fetch24hTicker(symbol) {
@@ -301,53 +381,4 @@ function indicatorDecision(symbol, last, prev, rsiVal, ema8V, ema14V, ema50V, at
   return { decision, confidence, sl, tp, reason };
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
 
-async function main() {
-  ensureDir(CONFIG.alphaDir);
-
-  let topSymbols;
-  try {
-    topSymbols = await fetchTopSymbols(CONFIG.symbolsToAnalyze * 2);
-    topSymbols = topSymbols.slice(0, CONFIG.symbolsToAnalyze);
-  } catch (err) {
-    console.error('Screener failed:', err.message);
-    return;
-  }
-
-  console.log(`[AlphaSight] Analyzing ${topSymbols.length} symbols with Ollama...`);
-
-  let signals = 0;
-  for (const symbol of topSymbols) {
-    const result = await analyzeSymbol(symbol);
-    if (!result) continue;
-
-    if (
-      (result.decision === 'LONG' || result.decision === 'SHORT') &&
-      result.confidence >= CONFIG.minConfidence
-    ) {
-      enqueueSignal({
-        id: `alpha_${symbol}_${result.ts}`,
-        symbol,
-        side: result.decision,
-        sl: result.sl,
-        tp: result.tp,
-        confidence: result.confidence,
-        source: 'AlphaSight',
-        ts: result.ts,
-        reason: result.reason,
-      });
-      signals++;
-      console.log(`[AlphaSight] Enqueued ${result.decision} ${symbol} (confidence ${(result.confidence * 100).toFixed(0)}%)`);
-    } else {
-      console.log(`[AlphaSight] Skipped ${symbol} (decision=${result.decision}, conf=${(result.confidence * 100).toFixed(0)}%)`);
-    }
-  }
-
-  console.log(`[AlphaSight] Done: ${signals} signals enqueued for validation`);
-}
-
-main().catch((e) => {
-  console.error('[AlphaSight] Fatal:', e.message);
-  process.exitCode = 1;
-});
