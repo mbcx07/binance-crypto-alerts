@@ -174,6 +174,26 @@ function renderAsciiChart(symbol, klines, ema8, ema14, ema50, rsi) {
 }
 
 // Compute EMA
+function computeATR(highs, lows, closes, period = 14) {
+  if (closes.length < period + 1) return null;
+  const trs = [];
+  for (let i = 1; i < closes.length; i++) {
+    const tr = Math.max(
+      highs[i] - lows[i],
+      Math.abs(highs[i] - closes[i - 1]),
+      Math.abs(lows[i] - closes[i - 1])
+    );
+    trs.push(tr);
+  }
+  const atr = new Array(period).fill(null);
+  const sma = trs.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  atr.push(sma);
+  for (let i = period; i < trs.length; i++) {
+    atr.push((atr[atr.length - 1] * (period - 1) + trs[i]) / period);
+  }
+  return atr;
+}
+
 function computeEMA(values, period) {
   if (values.length < period) return null;
   const k = 2 / (period + 1);
@@ -205,8 +225,42 @@ function computeRSI(closes, period = 14) {
 
 // ─── Ollama / LLaVA Analysis ─────────────────────────────────────────────────
 
-async function analyzeWithOllamaVision(symbol, chartText) {
-  const prompt = `You are an expert crypto trader analyzing 15-minute candlestick charts.\n\n${chartText}\n\nIMPORTANT: Reply ONLY with the following format, nothing else:\nDECISION: LONG\nCONFIDENCE: 75\nSL: 0.08234\nTP: 0.08567\nREASON: EMA crossover with RSI oversold and price bouncing from support`;
+async function analyzeWithOllamaVision(symbol, klines, closes, ema8, ema14, ema50, rsi, atr) {
+  const last = closes[closes.length - 1];
+  const prev = closes[closes.length - 2];
+  const rsiVal = rsi ? rsi[rsi.length - 1] : null;
+  const ema8V = ema8 ? ema8[ema8.length - 1] : null;
+  const ema14V = ema14 ? ema14[ema14.length - 1] : null;
+  const ema50V = ema50 ? ema50[ema50.length - 1] : null;
+  const atrVal = atr ? atr[atr.length - 1] : null;
+
+  const trend = ema8V && ema14V && ema50V
+    ? (ema8V > ema14V && ema14V > ema50V ? 'BULLISH' : ema8V < ema14V && ema14V < ema50V ? 'BEARISH' : 'NEUTRAL')
+    : 'UNKNOWN';
+
+  const prompt = `You are an expert crypto trader on Binance Futures 15m timeframe.
+
+SYMBOL: ${symbol}
+Current price: ${last?.toFixed(4)}
+Price change (last candle): ${((last - prev) / prev * 100).toFixed(2)}%
+RSI(14): ${rsiVal?.toFixed(1)}
+EMA8: ${ema8V?.toFixed(4)}
+EMA14: ${ema14V?.toFixed(4)}
+EMA50: ${ema50V?.toFixed(4)}
+ATR(14): ${atrVal?.toFixed(4)}
+Trend: ${trend}
+
+Recent 10 closes: ${closes.slice(-10).map((c) => c.toFixed(2)).join(', ')}
+
+Based ONLY on the data above (no images, no charts), is there a clear LONG, SHORT, or WAIT setup?
+Consider: RSI overbought (>70) or oversold (<30), EMA alignment, momentum, ATR volatility.
+
+Reply EXACTLY in this format, nothing else:
+DECISION: LONG
+CONFIDENCE: 0-100
+SL: price
+TP: price
+REASON: short explanation`;
 
   try {
     const response = await axios.post(`${CONFIG.ollama.baseUrl}/api/generate`, {
@@ -216,8 +270,9 @@ async function analyzeWithOllamaVision(symbol, chartText) {
       options: {
         temperature: 0.1,
         top_p: 0.8,
+        num_predict: 200,
       },
-    }, { timeout: 60000 });
+    }, { timeout: 90000 });
 
     const raw = response.data?.response || '';
     return parseOllamaResponse(raw);
@@ -303,19 +358,20 @@ async function analyzeSymbol(symbol) {
   if (!klines || klines.length < 20) return null;
 
   const closes = klines.map((k) => parseFloat(k[4]));
+  const highs = klines.map((k) => parseFloat(k[2]));
+  const lows = klines.map((k) => parseFloat(k[3]));
   const ema8 = computeEMA(closes, 8);
   const ema14 = computeEMA(closes, 14);
   const ema50 = computeEMA(closes, 50);
   const rsi = computeRSI(closes, 14);
+  const atr = computeATR(highs, lows, closes, 14);
 
-  const chartText = renderAsciiChart(symbol, klines, ema8, ema14, ema50, rsi);
-  const analysis = await analyzeWithOllamaVision(symbol, chartText);
+  const analysis = await analyzeWithOllamaVision(symbol, klines, closes, ema8, ema14, ema50, rsi, atr);
 
   return {
     symbol,
     ...analysis,
     ts: Date.now(),
-    chartText: chartText.slice(0, 200), // store snippet for debugging
   };
 }
 
