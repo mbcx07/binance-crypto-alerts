@@ -136,16 +136,33 @@ export async function runValidation() {
       const confidence = Math.round((signal.confidence || 0.7) * 100);
       const { markConfirmedAsTrade } = await import('./validate-queue.js');
       markConfirmedAsTrade(signal.id);
+
+      // Ejecutar orden real en Binance Futures
+      let tradeResult = null;
+      try {
+        const { openPosition } = await import('./trader.js');
+        tradeResult = await openPosition({
+          symbol: signal.symbol,
+          side: signal.side,
+          sl: signal.sl,
+          tp: signal.tp,
+        });
+      } catch (e) {
+        console.error(`[Pia] Trade execution error: ${e.message}`);
+      }
+
+      const tradeInfo = tradeResult
+        ? `📊 Balance usado: ~${POSITION_PCT || 1}%\n📌 Order ID: ${tradeResult.orderId || 'N/A'}\n⚡ Leverage: ${tradeResult.leverage || '?'}x`
+        : `⚠️ Ejecución no disponible`;
+
       const msg = [
-        `${emoji} **${signal.source}** — VALIDADA POR ANÁLISIS`,
+        `${emoji} **${signal.source}** — VALIDADA`,
         ``,
         `📊 **${signal.symbol}** | ${signal.side}`,
+        `💰 Entry: ${tradeResult?.entryPrice || signal.entryPrice || 'market'} | ⚠️ SL: ${signal.sl} | 🎯 TP: ${signal.tp}`,
+        `🔍 ${reason}`,
         ``,
-        `🎯 Confidence: ${confidence}%`,
-        `🛡️ SL: ${signal.sl}`,
-        `📈 TP: ${signal.tp}`,
-        ``,
-        `🔍 Validación: ${reason}`,
+        tradeInfo,
       ].join('\n');
 
       await sendTelegram(msg);
@@ -165,3 +182,8 @@ export async function runValidation() {
 }
 
 export { enqueueSignal };
+
+runValidation().catch((e) => {
+  console.error('[PiaValidate] Fatal:', e.message);
+  process.exitCode = 1;
+});
