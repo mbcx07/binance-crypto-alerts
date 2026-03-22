@@ -1,11 +1,15 @@
 /**
- * sl-tp-monitor.js — Vigila precios y cierra posiciones al tocar SL o TP.
- * Se ejecuta cada 30s via systemd timer.
- * Verificación doble: tras cerrar, confirma que la posición se cerró.
+ * sl-tp-monitor.js — Trailing Stop + Fixed TP para posiciones abiertas.
+ * Se ejecuta cada segundo via systemd timer.
+ *
+ * LONG:  trailing SL = max(peakPrice * 0.95, previousTrailingSL)
+ * SHORT: trailing SL = min(lowestPrice * 1.05, previousTrailingSL)
+ * TP fijo: 8% para ambos lados
  */
 
 import dotenv from 'dotenv';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -15,6 +19,21 @@ import { getAllPositions, closePosition } from './trader.js';
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID   || '';
+const TRAILING_PCT      = 0.05; // 5% trailing
+const TP_PCT            = 0.08; // 8% take profit fijo
+
+// Archivo para guardar el peak/lowest price de cada posición
+const TRAIL_FILE = path.join(__dirname, '..', 'data', 'trailing-state.json');
+
+function loadTrailState() {
+  try {
+    return JSON.parse(fs.readFileSync(TRAIL_FILE, 'utf8'));
+  } catch { return {}; }
+}
+
+function saveTrailState(state) {
+  fs.writeFileSync(TRAIL_FILE, JSON.stringify(state, null, 2));
+}
 
 async function sendTelegram(text) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
@@ -36,22 +55,16 @@ async function getMarkPrice(symbol) {
   } catch { return null; }
 }
 
-async function forceClose(symbol, side) {
-  console.log(`[SLTPMonitor] Force closing ${symbol}...`);
+async function forceClose(symbol) {
   try {
     await closePosition(symbol);
-    // Verificar que realmente se cerró
     const positions = await getAllPositions();
-    const stillOpen = positions.find(p => p.symbol === symbol);
-    if (stillOpen) {
-      console.log(`[SLTPMonitor] ${symbol} still open after close, retrying...`);
+    if (positions.some(p => p.symbol === symbol)) {
       await closePosition(symbol);
-    } else {
-      console.log(`[SLTPMonitor] ${symbol} closed successfully`);
     }
     return true;
   } catch (e) {
-    console.error(`[SLTPMonitor] Force close error: ${e.message}`);
+    console.error(`[TrailingSL] Close error: ${e.message}`);
     return false;
   }
 }
@@ -60,55 +73,112 @@ async function main() {
   const positions = await getAllPositions();
   if (!positions.length) return;
 
-  console.log(`[SLTPMonitor] Vigilando ${positions.length} posiciones...`);
+  const trail = loadTrailState();
+  let changed = false;
 
   for (const pos of positions) {
-    const symbol   = pos.symbol;
-    const amt      = Math.abs(parseFloat(pos.positionAmt));
-    const side     = parseFloat(pos.positionAmt) > 0 ? 'LONG' : 'SHORT';
-    const entry    = parseFloat(pos.entryPrice);
-
+    const symbol = pos.symbol;
+    const amt    = Math.abs(parseFloat(pos.positionAmt));
+    const side   = parseFloat(pos.positionAmt) > 0 ? 'LONG' : 'SHORT';
+    const entry  = parseFloat(pos.entryPrice);
     const markPrice = await getMarkPrice(symbol);
     if (!markPrice) continue;
 
-    // Niveles SL/TP: SL=2%, TP=5%
-    const slPrice = side === 'LONG' ? entry * 0.92 : entry * 1.08;
-    const tpPrice = side === 'LONG' ? entry * 1.08 : entry * 0.92;
-
-    // Detectar cruce
-    let hitSL = false, hitTP = false;
-    if (side === 'LONG') {
-      hitSL = markPrice <= slPrice;
-      hitTP = markPrice >= tpPrice;
-    } else {
-      hitSL = markPrice >= slPrice;
-      hitTP = markPrice <= tpPrice;
+    // Inicializar trail state si es nueva posición
+    if (!trail[symbol]) {
+      trail[symbol] = {
+        entry,
+        side,
+        peak: markPrice,
+        tpPrice: side === 'LONG' ? entry * 1.08 : entry * 0.92,
+        trailingSL: side === 'LONG' ? entry * 0.95 : entry * 1.05,
+      };
+      changed = true;
+      continue;
     }
 
-    const pnlPct = ((markPrice - entry) / entry * 100 * (side === 'LONG' ? 1 : -1)).toFixed(2);
-    const emoji  = side === 'LONG' ? '🟢' : '🔴';
+    const state = trail[symbol];
 
-    if (hitSL) {
-      console.log(`[SLTPMonitor] 🚨 ${symbol} SL HIT! Mark: ${markPrice} | SL: ${slPrice.toFixed(6)} | PnL: ${pnlPct}%`);
-      await sendTelegram(`${emoji} **${symbol}** SL HIT!\n📊 Precio: ${markPrice.toFixed(6)}\n🛡️ SL: ${slPrice.toFixed(6)}\nPnL: ${pnlPct}%`);
-      await forceClose(symbol, side);
-      await sendTelegram(`✅ ${symbol} cerrado por SL`);
+    // Si cambió de dirección, reiniciar
+    if (state.side !== side) {
+      trail[symbol] = {
+        entry, side, peak: markPrice,
+        tpPrice: side === 'LONG' ? entry * 1.08 : entry * 0.92,
+        trailingSL: side === 'LONG' ? entry * 0.95 : entry * 1.05,
+      };
+      changed = true;
+      continue;
+    }
 
-    } else if (hitTP) {
-      console.log(`[SLTPMonitor] 🎯 ${symbol} TP HIT! Mark: ${markPrice} | TP: ${tpPrice.toFixed(6)} | PnL: ${pnlPct}%`);
-      await sendTelegram(`🎯 **${symbol}** TP HIT!\n📊 Precio: ${markPrice.toFixed(6)}\n🎯 TP: ${tpPrice.toFixed(6)}\nPnL: ${pnlPct}%`);
-      await forceClose(symbol, side);
-      await sendTelegram(`✅ ${symbol} cerrado por TP`);
-
+    // ─── Actualizar peak/lowest ────────────────────────────────────────────
+    if (side === 'LONG') {
+      if (markPrice > state.peak) {
+        state.peak = markPrice;
+        state.trailingSL = state.peak * (1 - TRAILING_PCT);
+        changed = true;
+      }
     } else {
-      // Solo reportar si está cerca
-      const distSL = Math.abs(markPrice - slPrice) / markPrice * 100;
-      const distTP = Math.abs(markPrice - tpPrice) / markPrice * 100;
-      if (distSL < 1 || distTP < 1) {
-        console.log(`[SLTPMonitor] ${emoji} ${symbol} | Entry: ${entry} | Mark: ${markPrice.toFixed(4)} | SL: ${slPrice.toFixed(4)} | TP: ${tpPrice.toFixed(4)} | PnL: ${pnlPct}%`);
+      if (markPrice < state.peak) {
+        state.peak = markPrice; // lowest para SHORT
+        state.trailingSL = state.peak * (1 + TRAILING_PCT);
+        changed = true;
       }
     }
+
+    // ─── Calcular PnL actual ───────────────────────────────────────────────
+    const pnlPct = side === 'LONG'
+      ? (markPrice - entry) / entry * 100
+      : (entry - markPrice) / entry * 100;
+
+    // ─── Verificar TP ─────────────────────────────────────────────────────
+    let hitTP = false;
+    if (side === 'LONG') {
+      hitTP = markPrice >= state.tpPrice;
+    } else {
+      hitTP = markPrice <= state.tpPrice;
+    }
+
+    if (hitTP) {
+      const emoji = side === 'LONG' ? '🟢' : '🔴';
+      console.log(`[TrailingSL] 🎯 ${symbol} TP HIT! Price: ${markPrice} | TP: ${state.tpPrice.toFixed(6)} | PnL: ${pnlPct.toFixed(2)}%`);
+      await sendTelegram(`${emoji} **${symbol}** 🎯 TP HIT!\n📊 Precio: ${markPrice.toFixed(6)}\n🎯 TP: ${state.tpPrice.toFixed(6)}\n📈 PnL: ${pnlPct.toFixed(2)}%`);
+      if (await forceClose(symbol)) {
+        delete trail[symbol];
+        changed = true;
+        await sendTelegram(`✅ ${symbol} cerrado por TP`);
+      }
+      continue;
+    }
+
+    // ─── Verificar Trailing SL ─────────────────────────────────────────────
+    let hitSL = false;
+    if (side === 'LONG') {
+      hitSL = markPrice <= state.trailingSL;
+    } else {
+      hitSL = markPrice >= state.trailingSL;
+    }
+
+    if (hitSL) {
+      const emoji = side === 'LONG' ? '🟢' : '🔴';
+      console.log(`[TrailingSL] 🚨 ${symbol} TRAILING SL HIT! Price: ${markPrice} | TrailingSL: ${state.trailingSL.toFixed(6)} | PnL: ${pnlPct.toFixed(2)}%`);
+      await sendTelegram(`${emoji} **${symbol}** 🚨 Trailing SL HIT!\n📊 Precio: ${markPrice.toFixed(6)}\n🛡️ SL: ${state.trailingSL.toFixed(6)}\n📈 PnL: ${pnlPct.toFixed(2)}%`);
+      if (await forceClose(symbol)) {
+        delete trail[symbol];
+        changed = true;
+        await sendTelegram(`✅ ${symbol} cerrado por SL`);
+      }
+      continue;
+    }
+
+    // ─── Reporte si hay cambios significativos ───────────────────────────
+    const distToSL = Math.abs(markPrice - state.trailingSL) / markPrice * 100;
+    if (distToSL < 1 || Math.abs(pnlPct) > 5) {
+      const emoji = side === 'LONG' ? '🟢' : '🔴';
+      console.log(`[TrailingSL] ${emoji} ${symbol} | Entry: ${entry.toFixed(4)} | Mark: ${markPrice.toFixed(4)} | SL: ${state.trailingSL.toFixed(4)} | Peak: ${state.peak.toFixed(4)} | PnL: ${pnlPct.toFixed(2)}% | DistSL: ${distToSL.toFixed(2)}%`);
+    }
   }
+
+  if (changed) saveTrailState(trail);
 }
 
-main().catch(e => { console.error('[SLTPMonitor] Fatal:', e.message); process.exitCode = 1; });
+main().catch(e => { console.error('[TrailingSL] Fatal:', e.message); process.exitCode = 1; });
