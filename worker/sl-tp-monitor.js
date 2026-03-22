@@ -72,8 +72,8 @@ async function main() {
     if (!markPrice) continue;
 
     // Niveles SL/TP: SL=2%, TP=5%
-    const slPrice = side === 'LONG' ? entry * 0.98 : entry * 1.02;
-    const tpPrice = side === 'LONG' ? entry * 1.05 : entry * 0.95;
+    const slPrice = side === 'LONG' ? entry * 0.92 : entry * 1.08;
+    const tpPrice = side === 'LONG' ? entry * 1.08 : entry * 0.92;
 
     // Detectar cruce
     let hitSL = false, hitTP = false;

@@ -1,0 +1,11 @@
+[Unit]
+Description=Binance Crypto Alerts - SL/TP Monitor every second
+
+[Timer]
+OnBootSec=5s
+OnUnitActiveSec=1s
+Unit=binance-crypto-sltp.service
+AccuracySec=100ms
+
+[Install]
+WantedBy=timers.target
