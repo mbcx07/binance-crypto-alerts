@@ -134,6 +134,8 @@ export async function runValidation() {
     if (decision === 'CONFIRM') {
       const emoji = signal.side === 'LONG' ? '🟢' : '🔴';
       const confidence = Math.round((signal.confidence || 0.7) * 100);
+      const { markConfirmedAsTrade } = await import('./validate-queue.js');
+      markConfirmedAsTrade(signal.id);
       const msg = [
         `${emoji} **${signal.source}** — VALIDADA POR ANÁLISIS`,
         ``,

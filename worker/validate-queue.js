@@ -22,6 +22,7 @@ const __dirname = path.dirname(__filename);
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const QUEUE_FILE = path.join(DATA_DIR, 'validate-queue.json');
+const OPEN_TRADES_FILE = path.join(DATA_DIR, 'open-trades.json');
 
 export function readQueue() {
   if (!fs.existsSync(QUEUE_FILE)) return [];
@@ -60,6 +61,39 @@ export function getConfirmed() {
 
 export function getPending() {
   return readQueue().filter((q) => q.status === 'PENDING');
+}
+
+export function markConfirmedAsTrade(id) {
+  const queue = readQueue().map((q) =>
+    q.id === id ? { ...q, status: 'TRADE_ACTIVE', enteredAt: Date.now() } : q
+  );
+  writeQueue(queue);
+
+  // Also register in open-trades.json so monitor tracks SL/TP
+  const signal = queue.find((q) => q.id === id);
+  if (!signal) return;
+
+  let openTrades = [];
+  if (fs.existsSync(OPEN_TRADES_FILE)) {
+    try { openTrades = JSON.parse(fs.readFileSync(OPEN_TRADES_FILE, 'utf8')); } catch {}
+  }
+
+  const tradeId = `${signal.symbol}:${signal.side}:${id}`;
+  const trade = {
+    id: tradeId,
+    symbol: signal.symbol,
+    side: signal.side,
+    entry: null,           // Monitor will fill on first price check
+    entryPrice: null,
+    sl: signal.sl,
+    tp: signal.tp,
+    status: 'ENTRY_PENDING',
+    ts: Date.now(),
+    meta: { strategyId: signal.source, confidence: signal.confidence },
+  };
+
+  openTrades.push(trade);
+  fs.writeFileSync(OPEN_TRADES_FILE, JSON.stringify(openTrades, null, 2));
 }
 
 export function cleanOld(hoursOld = 24) {
