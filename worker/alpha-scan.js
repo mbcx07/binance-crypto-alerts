@@ -238,17 +238,18 @@ async function analyzeSymbol(symbol) {
     const ema50V = ema50?.[ema50.length - 1];
     const atrVal = atr?.[atr.length - 1];
 
-    let analysis = await analyzeWithOllama(
-      symbol, last, prev, rsiVal, ema8V, ema14V, ema50V, atrVal, closes, highs, lows
-    );
+    let analysis = indicatorDecision(symbol, last, prev, rsiVal, ema8V, ema14V, ema50V, atrVal);
 
-    // Fallback: if Ollama says WAIT or low confidence, use indicator-based decision
-    if (analysis.decision === 'WAIT' || analysis.confidence < CONFIG.minConfidence) {
-      const fallback = indicatorDecision(symbol, last, prev, rsiVal, ema8V, ema14V, ema50V, atrVal);
-      if (fallback) {
-        console.log(`[AlphaSight] ${symbol}: Ollama WAIT → using indicator fallback: ${fallback.decision}`);
-        analysis = fallback;
-      }
+    // Try Ollama in parallel — if it responds within 15s, use its answer instead
+    const ollamaPromise = analyzeWithOllama(symbol, last, prev, rsiVal, ema8V, ema14V, ema50V, atrVal, closes, highs, lows);
+    const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve(null), 15000));
+
+    const ollamaResult = await Promise.race([ollamaPromise, timeoutPromise]);
+    if (ollamaResult && ollamaResult.decision !== 'WAIT' && ollamaResult.confidence >= CONFIG.minConfidence) {
+      analysis = ollamaResult;
+      console.log(`[AlphaSight] ${symbol}: Ollama override: ${analysis.decision}`);
+    } else if (analysis) {
+      console.log(`[AlphaSight] ${symbol}: using indicator fallback: ${analysis.decision}`);
     }
 
     return { symbol, ...analysis, ts: Date.now() };
