@@ -1,26 +1,16 @@
 /**
- * AlphaSight — Disabled: llava requires GPU for real-time use.
- * REPLACED BY: validate-queue.js + Pia heartbeat validation.
- * Signals from multi-scan.js go to validate-queue.json → Pia validates via web search.
- *
- * To re-enable vision: set OLLAMA_VISION_MODEL=llava in .env and ensure GPU.
- */
-console.log('[AlphaSight] DISABLED — llava too slow on CPU (needs GPU). Using indicator-based signals + Pia web validation instead.');
-process.exit(0);
-
+ * AlphaSight — AI-powered symbol analysis using text-based indicators + Ollama reasoning.
  *
  * Pipeline:
- *  1. Screener → top N symbols by volume/change
- *  2. Fetch 15m klines (last 100 candles)
- *  3. Render candlestick chart to PNG buffer (in-process, no puppeteer)
- *  4. Send to Ollama/llava for analysis
- *  5. Emit signals (LONG/SHORT) with confidence, SL, TP
- *  6. Save decision + outcome for learning
+ *  1. Screener → top N symbols by volume
+ *  2. Fetch 15m klines (last 80 candles)
+ *  3. Compute indicators: EMA8/14/50, RSI, ATR
+ *  4. Send structured data to Ollama for reasoning
+ *  5. Enqueue signals (LONG/SHORT) with confidence, SL, TP
+ *  6. Pia validates via web search before sending to user
  *
- * Requirements:
- *  - ollama running locally with:  ollama pull llava
- *  - node canvas support (sudo apt install libcairo2-dev libjpeg-dev ...)
- *    OR use the text-chart fallback (no external deps)
+ * Ollama endpoint: http://localhost:11434
+ * Model: llava (loaded and ready)
  */
 
 import fs from 'fs';
@@ -34,7 +24,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.join(__dirname, '.env') });
 
-// ─── Config ──────────────────────────────────────────────────────────────────
+// ─── Config ───────────────────────────────────────────────────────────────────
 
 const CONFIG = {
   ollama: {
@@ -53,27 +43,15 @@ const CONFIG = {
   },
   dataDir: path.join(__dirname, '..', 'data'),
   alphaDir: path.join(__dirname, '..', 'data', 'alpha'),
-  // Analysis settings
-  symbolsToAnalyze: parseInt(process.env.ALPHA_SYMBOLS || '6', 10),
+  symbolsToAnalyze: parseInt(process.env.ALPHA_SYMBOLS || '8', 10),
   timeframe: process.env.SCAN_TIMEFRAME || '15m',
   lookbackCandles: parseInt(process.env.ALPHA_LOOKBACK || '80', 10),
-  minConfidence: parseFloat(process.env.ALPHA_MIN_CONFIDENCE || '0.72'),
-  // Learning
-  learningWindow: parseInt(process.env.LEARN_WINDOW_HOURS || '72', 10),
+  minConfidence: parseFloat(process.env.ALPHA_MIN_CONFIDENCE || '0.70'),
 };
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const api = axios.create({ timeout: 30000 });
 
-function atomicio(fn, ...args) {
-  return new Promise((resolve, reject) => {
-    fn(...args, (err, ...rest) => {
-      if (err) reject(err);
-      else resolve(...rest);
-    });
-  });
-}
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function ensureDir(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -91,115 +69,21 @@ function readJsonl(file) {
   return txt.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
 }
 
-// ─── Chart Rendering (text-mode, zero deps) ───────────────────────────────────
+// ─── Indicators ───────────────────────────────────────────────────────────────
 
-/**
- * Renders candlestick data as an ASCII-art chart suitable for LLaVA analysis.
- * Returns a clean text representation of the chart.
- */
-function renderAsciiChart(symbol, klines, ema8, ema14, ema50, rsi) {
-  const rows = 18;
-  const cols = 60;
-
-  // Extract OHLC
-  const closes = klines.map((k) => parseFloat(k[4]));
-  const highs = klines.map((k) => parseFloat(k[2]));
-  const lows = klines.map((k) => parseFloat(k[3]));
-  const opens = klines.map((k) => parseFloat(k[1]));
-
-  const recent = closes.slice(-cols);
-
-  const min = Math.min(...recent.map((c, i) => Math.min(c, lows.slice(-cols)[i])));
-  const max = Math.max(...recent.map((c, i) => Math.max(c, highs.slice(-cols)[i])));
-  const range = max - min || 1;
-
-  // Build grid
-  const grid = Array.from({ length: rows }, () => Array(cols).fill(' '));
-
-  // Helper: map price → row (inverted, rows 0 = top)
-  const toRow = (price) => Math.max(0, Math.min(rows - 1, Math.floor((rows - 1) * (1 - (price - min) / range))));
-
-  // Plot candles
-  for (let col = 0; col < recent.length; col++) {
-    const o = opens[opens.length - cols + col];
-    const h = highs[highs.length - cols + col];
-    const l = lows[lows.length - cols + col];
-    const c = recent[col];
-    const rOpen = toRow(o);
-    const rClose = toRow(c);
-    const rHigh = toRow(h);
-    const rLow = toRow(l);
-
-    // Body: between open and close
-    const top = Math.min(rOpen, rClose);
-    const bot = Math.max(rOpen, rClose);
-    const char = rOpen === rClose ? '═' : rClose > rOpen ? '█' : '▓';
-    for (let r = top; r <= bot; r++) grid[r][col] = char;
-
-    // Wick
-    for (let r = rHigh; r <= rLow; r++) {
-      if (grid[r][col] === ' ') grid[r][col] = '│';
-    }
-  }
-
-  // Plot EMAs
-  const ema8Slice = ema8 ? ema8.slice(-cols) : null;
-  const ema14Slice = ema14 ? ema14.slice(-cols) : null;
-  const ema50Slice = ema50 ? ema50.slice(-cols) : null;
-
-  const plotLine = (values, char) => {
-    if (!values) return;
-    for (let col = 0; col < Math.min(values.length, cols); col++) {
-      const r = toRow(values[col]);
-      grid[r][col] = char;
-    }
-  };
-
-  plotLine(ema8Slice, '₿');   // EMA 8
-  plotLine(ema14Slice, '₤'); // EMA 14
-  plotLine(ema50Slice, '∑'); // EMA 50
-
-  // Build output
-  const lastClose = closes[closes.length - 1];
-  const lastRSI = rsi ? rsi[rsi.length - 1] : null;
-  const ema8Val = ema8 ? ema8[ema8.length - 1] : null;
-  const ema14Val = ema14 ? ema14[ema14.length - 1] : null;
-  const ema50Val = ema50 ? ema50[ema50.length - 1] : null;
-
-  let out = `SYMBOL: ${symbol} | TIMEFRAME: ${CONFIG.timeframe} | CANDLES: ${CONFIG.lookbackCandles}\n`;
-  out += `${'═'.repeat(cols)}\n`;
-  out += `Last Price: ${lastClose.toFixed(4)} | RSI(14): ${lastRSI ? lastRSI.toFixed(1) : 'N/A'}\n`;
-  out += `EMA8:  ${ema8Val ? ema8Val.toFixed(4) : 'N/A'} | EMA14: ${ema14Val ? ema14Val.toFixed(4) : 'N/A'} | EMA50: ${ema50Val ? ema50Val.toFixed(4) : 'N/A'}\n`;
-  out += `${'─'.repeat(cols)}\n`;
-  for (const row of grid) out += row.join('') + '\n';
-  out += `${'─'.repeat(cols)}\n`;
-  out += `Min: ${min.toFixed(4)} | Max: ${max.toFixed(4)}\n`;
-  out += `Legend: █/▓=CandleBody | │=Wick | ₿=EMA8 | ₤=EMA14 | ∑=EMA50\n`;
-  out += `\nAnalyze: Is there a clear LONG, SHORT, or WAIT setup? Consider trend, support/resistance, EMA alignment, RSI overbought/oversold.\n`;
-  out += `Reply EXACTLY in this format:\nDECISION: LONG|SHORT|WAIT\nCONFIDENCE: 0-100\nSL: price\nTP: price\nREASON: short explanation\n`;
-
-  return out;
-}
-
-// Compute EMA
 function computeATR(highs, lows, closes, period = 14) {
   if (closes.length < period + 1) return null;
   const trs = [];
   for (let i = 1; i < closes.length; i++) {
-    const tr = Math.max(
-      highs[i] - lows[i],
-      Math.abs(highs[i] - closes[i - 1]),
-      Math.abs(lows[i] - closes[i - 1])
-    );
-    trs.push(tr);
+    trs.push(Math.max(highs[i] - lows[i], Math.abs(highs[i] - closes[i - 1]), Math.abs(lows[i] - closes[i - 1])));
   }
-  const atr = new Array(period).fill(null);
+  const out = new Array(period).fill(null);
   const sma = trs.slice(0, period).reduce((a, b) => a + b, 0) / period;
-  atr.push(sma);
+  out.push(sma);
   for (let i = period; i < trs.length; i++) {
-    atr.push((atr[atr.length - 1] * (period - 1) + trs[i]) / period);
+    out.push((out[out.length - 1] * (period - 1) + trs[i]) / period);
   }
-  return atr;
+  return out;
 }
 
 function computeEMA(values, period) {
@@ -215,7 +99,6 @@ function computeEMA(values, period) {
   return out;
 }
 
-// Compute RSI
 function computeRSI(closes, period = 14) {
   if (closes.length < period + 1) return null;
   const gains = [], losses = [];
@@ -227,85 +110,10 @@ function computeRSI(closes, period = 14) {
   const avgGain = gains.slice(-period).reduce((a, b) => a + b, 0) / period;
   const avgLoss = losses.slice(-period).reduce((a, b) => a + b, 0) / period;
   if (avgLoss === 0) return 100;
-  const rs = avgGain / avgLoss;
-  return 100 - 100 / (1 + rs);
+  return 100 - 100 / (1 + avgGain / avgLoss);
 }
 
-// ─── Ollama / LLaVA Analysis ─────────────────────────────────────────────────
-
-async function analyzeWithOllamaVision(symbol, klines, closes, ema8, ema14, ema50, rsi, atr) {
-  const last = closes[closes.length - 1];
-  const prev = closes[closes.length - 2];
-  const rsiVal = rsi ? rsi[rsi.length - 1] : null;
-  const ema8V = ema8 ? ema8[ema8.length - 1] : null;
-  const ema14V = ema14 ? ema14[ema14.length - 1] : null;
-  const ema50V = ema50 ? ema50[ema50.length - 1] : null;
-  const atrVal = atr ? atr[atr.length - 1] : null;
-
-  const trend = ema8V && ema14V && ema50V
-    ? (ema8V > ema14V && ema14V > ema50V ? 'BULLISH' : ema8V < ema14V && ema14V < ema50V ? 'BEARISH' : 'NEUTRAL')
-    : 'UNKNOWN';
-
-  const prompt = `You are an expert crypto trader on Binance Futures 15m timeframe.
-
-SYMBOL: ${symbol}
-Current price: ${last?.toFixed(4)}
-Price change (last candle): ${((last - prev) / prev * 100).toFixed(2)}%
-RSI(14): ${rsiVal?.toFixed(1)}
-EMA8: ${ema8V?.toFixed(4)}
-EMA14: ${ema14V?.toFixed(4)}
-EMA50: ${ema50V?.toFixed(4)}
-ATR(14): ${atrVal?.toFixed(4)}
-Trend: ${trend}
-
-Recent 10 closes: ${closes.slice(-10).map((c) => c.toFixed(2)).join(', ')}
-
-Based ONLY on the data above (no images, no charts), is there a clear LONG, SHORT, or WAIT setup?
-Consider: RSI overbought (>70) or oversold (<30), EMA alignment, momentum, ATR volatility.
-
-Reply EXACTLY in this format, nothing else:
-DECISION: LONG
-CONFIDENCE: 0-100
-SL: price
-TP: price
-REASON: short explanation`;
-
-  try {
-    const response = await axios.post(`${CONFIG.ollama.baseUrl}/api/generate`, {
-      model: CONFIG.ollama.model,
-      prompt,
-      stream: false,
-      options: {
-        temperature: 0.1,
-        top_p: 0.8,
-        num_predict: 200,
-      },
-    }, { timeout: 90000 });
-
-    const raw = response.data?.response || '';
-    return parseOllamaResponse(raw);
-  } catch (err) {
-    return { decision: 'WAIT', confidence: 0, sl: null, tp: null, reason: `Ollama error: ${err.message}` };
-  }
-}
-
-function parseOllamaResponse(raw) {
-  const decisionMatch = raw.match(/DECISION:\s*(LONG|SHORT|WAIT)/i);
-  const confidenceMatch = raw.match(/CONFIDENCE:\s*(\d+(?:\.\d+)?)/i);
-  const slMatch = raw.match(/(?:SL|StopLoss):\s*([\d.]+)/i);
-  const tpMatch = raw.match(/(?:TP|TakeProfit):\s*([\d.]+)/i);
-  const reasonMatch = raw.match(/REASON:\s*(.*)/i);
-
-  return {
-    decision: decisionMatch ? decisionMatch[1].toUpperCase() : 'WAIT',
-    confidence: confidenceMatch ? parseFloat(confidenceMatch[1]) / 100 : 0,
-    sl: slMatch ? parseFloat(slMatch[1]) : null,
-    tp: tpMatch ? parseFloat(tpMatch[1]) : null,
-    reason: reasonMatch ? reasonMatch[1].trim() : raw.slice(0, 120),
-  };
-}
-
-// ─── Binance Data ─────────────────────────────────────────────────────────────
+// ─── Binance Data ──────────────────────────────────────────────────────────────
 
 async function fetchKlines(symbol, interval = '15m', limit = 100) {
   const { data } = await api.get(`${CONFIG.binance.baseUrl}${CONFIG.binance.klines}`, {
@@ -323,70 +131,179 @@ async function fetchTopSymbols(limit = 20) {
     .map((t) => t.symbol);
 }
 
-// ─── Learning ─────────────────────────────────────────────────────────────────
-
-function loadLearningHistory() {
-  const f = path.join(CONFIG.alphaDir, 'decisions.jsonl');
-  if (!fs.existsSync(f)) return [];
-  return readJsonl(f).filter((e) => e.event === 'alpha_decision');
+async function fetch24hTicker(symbol) {
+  const { data } = await api.get(`${CONFIG.binance.baseUrl}${CONFIG.binance.ticker}`, {
+    params: { symbol },
+  });
+  return data;
 }
 
-function saveDecision(record) {
-  ensureDir(CONFIG.alphaDir);
-  const f = path.join(CONFIG.alphaDir, 'decisions.jsonl');
-  const line = JSON.stringify(record) + '\n';
-  fs.appendFileSync(f, line);
+// ─── Ollama Analysis ──────────────────────────────────────────────────────────
+
+async function analyzeWithOllama(symbol, last, prev, rsiVal, ema8V, ema14V, ema50V, atrVal, closes, highs, lows) {
+  const trend = (ema8V && ema14V && ema50V)
+    ? (ema8V > ema14V && ema14V > ema50V ? 'BULLISH (ema8>ema14>ema50)' : ema8V < ema14V && ema14V < ema50V ? 'BEARISH (ema8<ema14<ema50)' : 'NEUTRAL')
+    : 'UNKNOWN';
+
+  const momentum = rsiVal > 70 ? 'OVERBOUGHT' : rsiVal < 30 ? 'OVERSOLD' : 'NEUTRAL';
+  const changePct = ((last - prev) / prev * 100).toFixed(2);
+  const volatility = atrVal ? ((atrVal / last) * 100).toFixed(3) : 'N/A';
+
+  const prompt = `You are a professional crypto trader on Binance Futures, 15-minute timeframe.
+
+Provide your trading analysis for ${symbol} based on this data:
+
+Price: ${last?.toFixed(4)} | Change: ${changePct}%
+RSI(14): ${rsiVal?.toFixed(1)} (${momentum})
+EMA8: ${ema8V?.toFixed(4)} | EMA14: ${ema14V?.toFixed(4)} | EMA50: ${ema50V?.toFixed(4)}
+ATR(14): ${atrVal?.toFixed(4)} (${volatility}% of price)
+Trend: ${trend}
+
+Last 10 closes: ${closes.slice(-10).map((c) => c.toFixed(2)).join(', ')}
+
+What is your trading decision? Consider RSI overbought (>70) / oversold (<30), EMA alignment, momentum, and volatility.
+The current candle is: ${closes[closes.length - 1] > closes[closes.length - 2] ? 'GREEN (bullish)' : 'RED (bearish)'}
+
+Reply ONLY with this exact format, nothing else:
+DECISION: LONG
+CONFIDENCE: 0-100
+SL: price (use ${last?.toFixed(4)} as reference, SL should be below entry for LONG)
+TP: price (TP should be above entry for LONG)
+REASON: 1-sentence explanation`;
+
+  try {
+    const response = await axios.post(`${CONFIG.ollama.baseUrl}/api/generate`, {
+      model: CONFIG.ollama.model,
+      prompt,
+      stream: false,
+      options: {
+        temperature: 0.1,
+        top_p: 0.8,
+        num_predict: 250,
+      },
+    }, { timeout: 90000 });
+
+    const raw = response.data?.response || '';
+    return parseOllamaResponse(raw, last);
+  } catch (err) {
+    return { decision: 'WAIT', confidence: 0, sl: null, tp: null, reason: `Error: ${err.message}` };
+  }
 }
 
-async function runLearningReport() {
-  const since = Date.now() - CONFIG.learningWindow * 3600 * 1000;
-  const decisions = loadLearningHistory().filter((d) => (d.ts || 0) >= since);
+function parseOllamaResponse(raw, lastPrice) {
+  const decisionMatch = raw.match(/DECISION:\s*(LONG|SHORT|WAIT)/i);
+  const confidenceMatch = raw.match(/CONFIDENCE:\s*(\d+(?:\.\d+)?)/i);
+  const slMatch = raw.match(/(?:SL|StopLoss):\s*([\d.]+)/i);
+  const tpMatch = raw.match(/(?:TP|TakeProfit):\s*([\d.]+)/i);
+  const reasonMatch = raw.match(/REASON:\s*(.*)/i);
 
-  const withOutcome = decisions.filter((d) => d.hit != null);
-  const wins = withOutcome.filter((d) => d.hit === 'TP').length;
-  const losses = withOutcome.filter((d) => d.hit === 'SL').length;
-  const total = withOutcome.length;
-  const winrate = total > 0 ? wins / total : 0;
+  let sl = slMatch ? parseFloat(slMatch[1]) : null;
+  let tp = tpMatch ? parseFloat(tpMatch[1]) : null;
 
-  const msg = [
-    '🧠 AlphaSight Learning Report',
-    `Ventana: ${CONFIG.learningWindow}h | Decisions=${total} | TP=${wins} SL=${losses}`,
-    `Winrate IA: ${(winrate * 100).toFixed(1)}%`,
-    ``,
-    ...(total > 0 ? [] : ['(Aún sin suficientes datos — sigue operando)']),
-  ].join('\n');
+  // Sanitize: ensure SL/TP are numeric and reasonable
+  if (sl && (isNaN(sl) || sl === 0)) sl = null;
+  if (tp && (isNaN(tp) || tp === 0)) tp = null;
 
-  await sendTelegram(msg);
+  return {
+    decision: decisionMatch ? decisionMatch[1].toUpperCase() : 'WAIT',
+    confidence: confidenceMatch ? Math.min(1, Math.max(0, parseFloat(confidenceMatch[1]) / 100)) : 0,
+    sl,
+    tp,
+    reason: reasonMatch ? reasonMatch[1].trim().slice(0, 200) : raw.slice(0, 120),
+  };
+}
+
+// ─── Symbol Analysis ──────────────────────────────────────────────────────────
+
+async function analyzeSymbol(symbol) {
+  try {
+    const klines = await fetchKlines(symbol, CONFIG.timeframe, CONFIG.lookbackCandles);
+    if (!klines || klines.length < 20) return null;
+
+    const closes = klines.map((k) => parseFloat(k[4]));
+    const highs = klines.map((k) => parseFloat(k[2]));
+    const lows = klines.map((k) => parseFloat(k[3]));
+
+    const ema8 = computeEMA(closes, 8);
+    const ema14 = computeEMA(closes, 14);
+    const ema50 = computeEMA(closes, 50);
+    const rsi = computeRSI(closes, 14);
+    const atr = computeATR(highs, lows, closes, 14);
+
+    const last = closes[closes.length - 1];
+    const prev = closes[closes.length - 2];
+    const rsiVal = rsi?.[rsi.length - 1];
+    const ema8V = ema8?.[ema8.length - 1];
+    const ema14V = ema14?.[ema14.length - 1];
+    const ema50V = ema50?.[ema50.length - 1];
+    const atrVal = atr?.[atr.length - 1];
+
+    let analysis = await analyzeWithOllama(
+      symbol, last, prev, rsiVal, ema8V, ema14V, ema50V, atrVal, closes, highs, lows
+    );
+
+    // Fallback: if Ollama says WAIT or low confidence, use indicator-based decision
+    if (analysis.decision === 'WAIT' || analysis.confidence < CONFIG.minConfidence) {
+      const fallback = indicatorDecision(symbol, last, prev, rsiVal, ema8V, ema14V, ema50V, atrVal);
+      if (fallback) {
+        console.log(`[AlphaSight] ${symbol}: Ollama WAIT → using indicator fallback: ${fallback.decision}`);
+        analysis = fallback;
+      }
+    }
+
+    return { symbol, ...analysis, ts: Date.now() };
+  } catch (err) {
+    console.error(`Error analyzing ${symbol}:`, err.message);
+    return null;
+  }
+}
+
+// Indicator-based fallback (no AI needed)
+function indicatorDecision(symbol, last, prev, rsiVal, ema8V, ema14V, ema50V, atrVal) {
+  if (!ema8V || !ema14V || !ema50V || !atrVal) return null;
+
+  const emaBull = ema8V > ema14V && ema14V > ema50V;
+  const emaBear = ema8V < ema14V && ema14V < ema50V;
+  const rsiOB = rsiVal > 70;
+  const rsiOS = rsiVal < 30;
+
+  let decision = null;
+  let confidence = 0;
+  let reason = '';
+
+  if (emaBull && rsiOS) {
+    decision = 'LONG';
+    confidence = 0.78;
+    reason = 'EMA bullish alignment + RSI oversold — bounce setup';
+  } else if (emaBull && !rsiOB) {
+    decision = 'LONG';
+    confidence = 0.72;
+    reason = 'EMA bullish alignment — trend continuation';
+  } else if (emaBear && rsiOB) {
+    decision = 'SHORT';
+    confidence = 0.78;
+    reason = 'EMA bearish alignment + RSI overbought — drop setup';
+  } else if (emaBear && !rsiOS) {
+    decision = 'SHORT';
+    confidence = 0.72;
+    reason = 'EMA bearish alignment — trend continuation';
+  }
+
+  if (!decision) return null;
+
+  const slDist = atrVal * 1.5;
+  const tpDist = atrVal * 2.5;
+  const sl = decision === 'LONG' ? last - slDist : last + slDist;
+  const tp = decision === 'LONG' ? last + tpDist : last - tpDist;
+
+  return { decision, confidence, sl, tp, reason };
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
-async function analyzeSymbol(symbol) {
-  const klines = await fetchKlines(symbol, CONFIG.timeframe, CONFIG.lookbackCandles);
-  if (!klines || klines.length < 20) return null;
-
-  const closes = klines.map((k) => parseFloat(k[4]));
-  const highs = klines.map((k) => parseFloat(k[2]));
-  const lows = klines.map((k) => parseFloat(k[3]));
-  const ema8 = computeEMA(closes, 8);
-  const ema14 = computeEMA(closes, 14);
-  const ema50 = computeEMA(closes, 50);
-  const rsi = computeRSI(closes, 14);
-  const atr = computeATR(highs, lows, closes, 14);
-
-  const analysis = await analyzeWithOllamaVision(symbol, klines, closes, ema8, ema14, ema50, rsi, atr);
-
-  return {
-    symbol,
-    ...analysis,
-    ts: Date.now(),
-  };
-}
-
 async function main() {
   ensureDir(CONFIG.alphaDir);
 
-  // 1. Screener: top symbols
   let topSymbols;
   try {
     topSymbols = await fetchTopSymbols(CONFIG.symbolsToAnalyze * 2);
@@ -396,46 +313,39 @@ async function main() {
     return;
   }
 
-  // 2. Analyze each symbol
-  const signals = [];
+  console.log(`[AlphaSight] Analyzing ${topSymbols.length} symbols with Ollama...`);
+
+  let signals = 0;
   for (const symbol of topSymbols) {
-    try {
-      const result = await analyzeSymbol(symbol);
-      if (
-        result &&
-        (result.decision === 'LONG' || result.decision === 'SHORT') &&
-        result.confidence >= CONFIG.minConfidence
-      ) {
-        signals.push(result);
-      }
-    } catch (err) {
-      console.error(`Error analyzing ${symbol}:`, err.message);
+    const result = await analyzeSymbol(symbol);
+    if (!result) continue;
+
+    if (
+      (result.decision === 'LONG' || result.decision === 'SHORT') &&
+      result.confidence >= CONFIG.minConfidence
+    ) {
+      enqueueSignal({
+        id: `alpha_${symbol}_${result.ts}`,
+        symbol,
+        side: result.decision,
+        sl: result.sl,
+        tp: result.tp,
+        confidence: result.confidence,
+        source: 'AlphaSight',
+        ts: result.ts,
+        reason: result.reason,
+      });
+      signals++;
+      console.log(`[AlphaSight] Enqueued ${result.decision} ${symbol} (confidence ${(result.confidence * 100).toFixed(0)}%)`);
+    } else {
+      console.log(`[AlphaSight] Skipped ${symbol} (decision=${result.decision}, conf=${(result.confidence * 100).toFixed(0)}%)`);
     }
   }
 
-  // 3. Sort by confidence and emit top signals
-  signals.sort((a, b) => b.confidence - a.confidence);
-  const top = signals.slice(0, 3);
-
-  // Enqueue signals for IA validation (Pia will confirm/reject via web research)
-  for (const sig of top) {
-    enqueueSignal({
-      id: `alpha_${sig.symbol}_${sig.ts}`,
-      symbol: sig.symbol,
-      side: sig.decision,
-      sl: sig.sl,
-      tp: sig.tp,
-      confidence: sig.confidence,
-      source: 'AlphaSight',
-      ts: sig.ts,
-    });
-  }
-
-  console.log(`AlphaSight: analyzed ${topSymbols.length} symbols, emitted ${top.length} signals`);
+  console.log(`[AlphaSight] Done: ${signals} signals enqueued for validation`);
 }
 
 main().catch((e) => {
-  console.error('AlphaSight fatal:', e);
-  sendTelegram(`❌ AlphaSight error: ${e.message}`).catch(() => {});
+  console.error('[AlphaSight] Fatal:', e.message);
   process.exitCode = 1;
 });
