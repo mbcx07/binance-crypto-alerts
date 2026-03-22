@@ -68,7 +68,7 @@ async function main() {
   const pending = queue
     .filter(s => s.status === 'PENDING')
     .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
-    .slice(0, slots * 2); // tomar el doble para intentar
+    .slice(0, 50); // tomar hasta 50 para encontrar fichas con notional suficiente
 
   if (!pending.length) {
     console.log('[PositionMonitor] No pending signals in queue');
