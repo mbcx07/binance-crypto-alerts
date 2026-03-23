@@ -19,8 +19,8 @@ import { getAllPositions, closePosition } from './trader.js';
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID   || '';
-const TRAILING_PCT      = 0.05; // 5% trailing
-const TP_PCT            = 0.08; // 8% take profit fijo
+const TRAILING_PCT      = 0.025; // 5% trailing (riesgo)
+const TP_PCT            = 0.10; // 10% take profit (recompensa 1:2)
 
 // Archivo para guardar el peak/lowest price de cada posición
 const TRAIL_FILE = path.join(__dirname, '..', 'data', 'trailing-state.json');
@@ -90,8 +90,8 @@ async function main() {
         entry,
         side,
         peak: markPrice,
-        tpPrice: side === 'LONG' ? entry * 1.08 : entry * 0.92,
-        trailingSL: side === 'LONG' ? entry * 0.95 : entry * 1.05,
+        tpPrice: side === 'LONG' ? entry * 1.05 : entry * 0.95,
+        trailingSL: side === 'LONG' ? entry * 0.975 : entry * 1.025,
       };
       changed = true;
       continue;
@@ -103,8 +103,8 @@ async function main() {
     if (state.side !== side) {
       trail[symbol] = {
         entry, side, peak: markPrice,
-        tpPrice: side === 'LONG' ? entry * 1.08 : entry * 0.92,
-        trailingSL: side === 'LONG' ? entry * 0.95 : entry * 1.05,
+        tpPrice: side === 'LONG' ? entry * 1.05 : entry * 0.95,
+        trailingSL: side === 'LONG' ? entry * 0.975 : entry * 1.025,
       };
       changed = true;
       continue;

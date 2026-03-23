@@ -12,6 +12,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import axios from 'axios';
+import fs from 'fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '.env') });
@@ -48,6 +49,24 @@ async function getOpenPositions() {
 
 async function main() {
   console.log('[PositionMonitor] Checking open positions...');
+
+  // Lock para evitar race conditions con ejecuciones simultáneas
+  const LOCK_FILE = path.join(__dirname, '..', 'data', 'position-monitor.lock');
+  const acquireLock = () => {
+    try {
+      if (fs.existsSync(LOCK_FILE)) {
+        const pid = parseInt(fs.readFileSync(LOCK_FILE, 'utf8'));
+        try { process.kill(pid, 0); return false; } catch { /* stale lock */ }
+      }
+      fs.writeFileSync(LOCK_FILE, process.pid.toString());
+      return true;
+    } catch { return true; }
+  };
+  if (!acquireLock()) {
+    console.log('[PositionMonitor] Already running, skipping...');
+    return;
+  }
+  process.on('exit', () => { try { fs.unlinkSync(LOCK_FILE); } catch {} });
 
   const open = await getOpenPositions();
   // Solo contar como "nuestras" las posiciones que están en nuestra cola

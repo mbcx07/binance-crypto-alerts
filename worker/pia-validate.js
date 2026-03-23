@@ -20,6 +20,7 @@ dotenv.config({ path: path.join(__dirname, '.env') });
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const QUEUE_FILE = path.join(DATA_DIR, 'validate-queue.json');
+const POSITION_PCT = parseFloat(process.env.FUTURES_POSITION_PCT || '1');
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
