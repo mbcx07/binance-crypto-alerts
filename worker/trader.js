@@ -58,7 +58,8 @@ async function signedRequest(method, endpoint, params = {}) {
 export async function getBalance() {
   const data = await signedRequest('GET', '/fapi/v2/balance');
   const usdt = data.find(b => b.asset === 'USDT');
-  return usdt ? parseFloat(usdt.availableBalance) : 0;
+  // balance = balance total (incluye PnL de posiciones abiertas)
+  return usdt ? parseFloat(usdt.balance) : 0;
 }
 
 export async function getPosition(symbol) {
@@ -127,9 +128,9 @@ export async function openPosition({ symbol, side, sl, tp, entryPrice }) {
 
   await setLeverage(symbol, leverage);
 
-  // Cantidad en contratos
+  // Cantidad en contratos (con leverage aplicado)
   const price = entryPrice || await getPrice(symbol);
-  const qty = rawQtyUSDT / price;
+  const qty = (rawQtyUSDT * leverage) / price;
 
   // Redondear segun precision del simbolo
   const lotSizeFilter = symInfo.filters.find(f => f.filterType === 'LOT_SIZE');

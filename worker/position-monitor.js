@@ -50,21 +50,26 @@ async function main() {
   console.log('[PositionMonitor] Checking open positions...');
 
   const open = await getOpenPositions();
-  console.log(`[PositionMonitor] Open: ${open.length}/${MAX_OPEN}`);
+  // Solo contar como "nuestras" las posiciones que están en nuestra cola
+  const queue = readQueue();
+  const ourTracked = new Set(queue.filter(s => s.status === 'TRADE_ACTIVE').map(s => s.symbol));
+  const ourOpen = open.filter(p => ourTracked.has(p.symbol));
 
-  if (open.length >= MAX_OPEN) {
-    // Mostrar estado
-    const pnl = open.reduce((sum, p) => sum + p.pnl, 0);
-    console.log(`[PositionMonitor] Full (${open.length}) | Total PNL: ${pnl.toFixed(2)} USDT`);
+  console.log(`[PositionMonitor] Binance: ${open.length} | Ours: ${ourOpen.length}/${MAX_OPEN}`);
+
+  if (ourOpen.length >= MAX_OPEN) {
+    // Todas nuestras slots están llenas — verificar si Belastrader tiene posiciones
+    if (open.length > ourOpen.length) {
+      console.log(`[PositionMonitor] Belastrader tiene ${open.length - ourOpen.length} posiciones — ignorando`);
+    }
     return;
   }
 
   // Cuantas faltan?
-  const slots = MAX_OPEN - open.length;
+  const slots = MAX_OPEN - ourOpen.length;
   console.log(`[PositionMonitor] ${slots} slots available — filling from queue...`);
 
   // Buscar mejores pendientes en cola
-  const queue = readQueue();
   const pending = queue
     .filter(s => s.status === 'PENDING')
     .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
