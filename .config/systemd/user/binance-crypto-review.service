@@ -1,0 +1,8 @@
+[Unit]
+Description=Binance Crypto Alerts - Hourly Review Service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/moises-beltran-castro/.openclaw/workspace/binance-crypto-alerts/worker
+ExecStart=/usr/bin/node /home/moises-beltran-castro/.openclaw/workspace/binance-crypto-alerts/worker/hourly-review.js
+Environment=NODE_ENV=production

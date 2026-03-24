@@ -1,0 +1,10 @@
+[Unit]
+Description=Binance Crypto Alerts - Hourly Review
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=3600s
+Unit=binance-crypto-review.service
+
+[Install]
+WantedBy=timers.target

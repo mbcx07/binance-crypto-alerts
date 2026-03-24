@@ -1,10 +1,11 @@
 /**
  * sl-tp-monitor.js — Trailing Stop + Fixed TP para posiciones abiertas.
- * Se ejecuta cada segundo via systemd timer.
+ * Se ejecuta cada segundo via systemd service (loop interno).
  *
- * LONG:  trailing SL = max(peakPrice * 0.95, previousTrailingSL)
- * SHORT: trailing SL = min(lowestPrice * 1.05, previousTrailingSL)
- * TP fijo: 8% para ambos lados
+ * Ratio 1:2 — SL 4% trailing / TP 8%
+ * LONG:  trailing SL = peakPrice * 0.96 (sube con el precio)
+ * SHORT: trailing SL = peakPrice * 1.04 (baja con el precio)
+ * TP: 8% sobre entry (LONG=*1.08, SHORT=*0.92)
  */
 
 import dotenv from 'dotenv';
@@ -19,8 +20,8 @@ import { getAllPositions, closePosition } from './trader.js';
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID   || '';
-const TRAILING_PCT      = 0.025; // 5% trailing (riesgo)
-const TP_PCT            = 0.10; // 10% take profit (recompensa 1:2)
+const TRAILING_PCT      = 0.04; // 5% trailing (riesgo)
+const TP_PCT            = 0.08; // 10% take profit (recompensa 1:2)
 
 // Archivo para guardar el peak/lowest price de cada posición
 const TRAIL_FILE = path.join(__dirname, '..', 'data', 'trailing-state.json');
@@ -90,8 +91,8 @@ async function main() {
         entry,
         side,
         peak: markPrice,
-        tpPrice: side === 'LONG' ? entry * 1.05 : entry * 0.95,
-        trailingSL: side === 'LONG' ? entry * 0.975 : entry * 1.025,
+        tpPrice: side === 'LONG' ? entry * 1.08 : entry * 0.95,
+        trailingSL: side === 'LONG' ? entry * 0.96 : entry * 1.04,
       };
       changed = true;
       continue;
@@ -103,8 +104,8 @@ async function main() {
     if (state.side !== side) {
       trail[symbol] = {
         entry, side, peak: markPrice,
-        tpPrice: side === 'LONG' ? entry * 1.05 : entry * 0.95,
-        trailingSL: side === 'LONG' ? entry * 0.975 : entry * 1.025,
+        tpPrice: side === 'LONG' ? entry * 1.08 : entry * 0.95,
+        trailingSL: side === 'LONG' ? entry * 0.96 : entry * 1.04,
       };
       changed = true;
       continue;
