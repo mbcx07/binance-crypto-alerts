@@ -126,7 +126,14 @@ async function main() {
 
       if (result && !result.test) {
         filled++;
-        updateStatus(sig.id, 'TRADE_ACTIVE', 'Executed by PositionMonitor');
+        updateStatus(sig.id, 'TRADE_ACTIVE', 'Executed by PositionMonitor', {
+          entryPrice: result.entryPrice,
+          tpPrice: sig.tp,
+          slPrice: sig.sl,
+          side: sig.side,
+          qty: result.qty,
+          leverage: result.leverage,
+        });
 
         const emoji = sig.side === 'LONG' ? '🟢' : '🔴';
         await sendTelegram(

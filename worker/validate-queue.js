@@ -46,10 +46,10 @@ export function enqueueSignal(signal) {
   writeQueue(queue);
 }
 
-export function updateStatus(id, status, reason) {
+export function updateStatus(id, status, reason, extra = {}) {
   const queue = readQueue().map((q) =>
     q.id === id
-      ? { ...q, status, validationReason: reason, validatedAt: Date.now() }
+      ? { ...q, status, validationReason: reason, validatedAt: Date.now(), ...extra }
       : q
   );
   writeQueue(queue);
